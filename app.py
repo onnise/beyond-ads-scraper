@@ -106,14 +106,25 @@ if submitted:
             # Display Data
             st.dataframe(df)
             
-            # Download Button (with UTF-8-SIG for Excel support)
-            csv = df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
+            # Dynamic Filename: Scrape_Industry_Count.xlsx
+            # Clean industry name for filename (remove spaces/special chars if needed, but simple replace is usually enough)
+            safe_industry = industry_input.replace(" ", "_").replace("/", "-")
+            safe_area = area_input.replace(" ", "_").replace("/", "-")
+            filename = f"Scrape_{safe_industry}_{len(df)}.xlsx"
+
+            # Download Button (Excel format)
+            import io
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False, sheet_name='Sheet1')
+            
             st.download_button(
-                label="📥 Download CSV",
-                data=csv,
-                file_name='scraped_data.csv',
-                mime='text/csv',
+                label="📥 Download Excel",
+                data=buffer.getvalue(),
+                file_name=filename,
+                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
             )
+
         else:
             if result["total_found"] > 0 and result["filtered_count"] > 0:
                  status_placeholder.error(f"⚠️ Found {result['total_found']} results, but ALL were filtered out because they didn't match '{strict_area_filter}'.")
