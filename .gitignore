@@ -1,5 +1,10 @@
 __pycache__/
-*.pyc
-result.csv
-output.csv
-playwright/.cache/ 
+*.py[cod]
+*$py.class
+*.csv
+.env
+venv/
+.vscode/
+debug_no_results.html
+error_screenshot.png
+debug.html

@@ -1,12 +1,14 @@
 import logging
+import os
 from typing import List, Optional
-from playwright.sync_api import sync_playwright, Page
+from playwright.sync_api import sync_playwright, Page, TimeoutError
 from dataclasses import dataclass, asdict
 import pandas as pd
 import argparse
 import platform
 import time
-import os
+import pandas as pd
+import re
 
 @dataclass
 class Place:
@@ -14,6 +16,10 @@ class Place:
     address: str = ""
     website: str = ""
     phone_number: str = ""
+    phone_clean: str = ""
+    phone_type: str = "Unknown"
+    is_valid_phone: bool = False
+    instagram: str = ""
     reviews_count: Optional[int] = None
     reviews_average: Optional[float] = None
     store_shopping: str = "No"
@@ -37,6 +43,52 @@ def extract_text(page: Page, xpath: str) -> str:
         logging.warning(f"Failed to extract text for xpath {xpath}: {e}")
     return ""
 
+def validate_lebanese_phone(phone_raw: str):
+    """
+    Validates and cleans a Lebanese phone number.
+    Returns (cleaned_number, type, is_valid)
+    """
+    if not phone_raw:
+        return "", "Missing", False
+        
+    # Remove non-digits
+    digits = re.sub(r'\D', '', phone_raw)
+    
+    # Handle country code
+    if digits.startswith('961'):
+        digits = digits[3:]
+    elif digits.startswith('00961'):
+        digits = digits[5:]
+        
+    # Check length and prefixes
+    # Landlines: 01, 04, 05, 06, 07, 08, 09 (followed by 6 digits) -> total 8 digits (with 0)
+    # Mobiles: 03 (followed by 6 digits) -> total 8 digits (with 0)
+    # Mobiles: 70, 71, 76, 78, 79, 81 (followed by 6 digits) -> total 8 digits
+    # Sometimes 03 is written as 3xxxxxx (7 digits)
+    
+    # Standardize to local format (with leading 0) if possible
+    
+    # Case 1: 7 digits (e.g. 3xxxxxx or 1xxxxxx for Beirut landline without 0)
+    if len(digits) == 7:
+        if digits.startswith('3'):
+            return '0' + digits, "Mobile", True
+        elif digits.startswith(('1', '4', '5', '6', '7', '8', '9')): # Landline area codes
+             # Note: 7 is usually 70/71 mobile, but 07 is south landline. 
+             # 7xxxxxx is ambiguous without context, but usually 03 is the only 7-digit mobile widely used without 0.
+             # Actually, 70/71 are 8 digits: 70xxxxxx.
+             # So if it starts with 7 and is 7 digits, it might be 07 landline?
+             return '0' + digits, "Landline", True
+             
+    # Case 2: 8 digits (Standard local format)
+    if len(digits) == 8:
+        prefix = digits[:2]
+        if prefix in ['03', '70', '71', '76', '78', '79', '81']:
+            return digits, "Mobile", True
+        elif prefix in ['01', '04', '05', '06', '07', '08', '09']:
+            return digits, "Landline", True
+            
+    return digits, "Unknown", False
+
 def extract_place(page: Page) -> Place:
     # XPaths
     name_xpath = '//div[@class="TIHn2 "]//h1[@class="DUwDvf lfPIob"]'
@@ -56,8 +108,39 @@ def extract_place(page: Page) -> Place:
     place = Place()
     place.name = extract_text(page, name_xpath)
     place.address = extract_text(page, address_xpath)
-    place.website = extract_text(page, website_xpath)
+    
+    # Extract website href
+    try:
+        if page.locator('//a[@data-item-id="authority"]').count() > 0:
+            url = page.locator('//a[@data-item-id="authority"]').get_attribute('href') or ""
+            if "instagram.com" in url:
+                place.instagram = url
+                place.website = "invalid"
+            elif "facebook.com" in url:
+                place.website = "invalid"
+            else:
+                place.website = url
+        else:
+            place.website = "invalid"
+    except Exception as e:
+        logging.warning(f"Failed to extract website href: {e}")
+        place.website = extract_text(page, website_xpath) or "invalid"
+
+    # Double check if fallback extraction got a social link
+    if "instagram.com" in place.website:
+        place.instagram = place.website
+        place.website = "invalid"
+    elif "facebook.com" in place.website:
+        place.website = "invalid"
+
     place.phone_number = extract_text(page, phone_number_xpath)
+    
+    # Phone Validation
+    clean, p_type, valid = validate_lebanese_phone(place.phone_number)
+    place.phone_clean = clean
+    place.phone_type = p_type
+    place.is_valid_phone = valid
+    
     place.place_type = extract_text(page, place_type_xpath)
     place.introduction = extract_text(page, intro_xpath) or "None Found"
 
@@ -108,64 +191,194 @@ def extract_place(page: Page) -> Place:
                 place.opens_at = opens_at2_raw.replace("\u202f","")
     return place
 
-def scrape_places(search_for: str, total: int) -> List[Place]:
+def handle_consent(page: Page):
+    try:
+        # Common consent button selectors
+        consent_selectors = [
+            '//button[contains(@aria-label, "Accept all")]',
+            '//button//span[contains(text(), "Accept all")]',
+            '//button//div[contains(text(), "Accept all")]',
+            '//button//span[contains(text(), "I agree")]',
+            'form[action*="consent"] button'
+        ]
+        
+        for selector in consent_selectors:
+            if page.locator(selector).count() > 0 and page.locator(selector).first.is_visible():
+                logging.info(f"Clicking consent button: {selector}")
+                page.locator(selector).first.click()
+                time.sleep(2)
+                return
+    except Exception as e:
+        logging.warning(f"Consent handling failed: {e}")
+
+def scrape_places(search_for: str, total: int, callback=None, required_area: str = None) -> dict:
     setup_logging()
     places: List[Place] = []
+    seen_places = set()
+    stats = {
+        "total_found": 0,
+        "filtered_count": 0,
+        "places": []
+    }
     with sync_playwright() as p:
-        if platform.system() == "Windows":
-            browser_path = r"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
-            browser = p.chromium.launch(executable_path=browser_path, headless=False)
-        else:
-            browser = p.chromium.launch(headless=False)
-        page = browser.new_page()
+        browser = None
         try:
-            page.goto("https://www.google.com/maps/@32.9817464,70.1930781,3.67z?", timeout=60000)
-            page.wait_for_timeout(1000)
-            page.locator('//input[@id="searchboxinput"]').fill(search_for)
-            page.keyboard.press("Enter")
-            page.wait_for_selector('//a[contains(@href, "https://www.google.com/maps/place")]')
+            browser = p.chromium.launch(headless=True)
+        except Exception as e:
+            logging.warning(f"Could not launch browser directly: {e}")
+            logging.info("Attempting to install Playwright browsers...")
+            import subprocess
+            subprocess.run(["python", "-m", "playwright", "install", "chromium"])
+            browser = p.chromium.launch(headless=True)
+            
+        # Create a context with specific user agent
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        page = context.new_page()
+        try:
+            # Navigate directly to the search results
+            import urllib.parse
+            encoded_query = urllib.parse.quote(search_for)
+            url = f"https://www.google.com/maps/search/{encoded_query}?hl=en"
+            
+            logging.info(f"Navigating to {url}")
+            page.goto(url, timeout=60000)
+            page.wait_for_timeout(5000)
+            
+            handle_consent(page)
+
+            # Wait for results to appear
+            logging.info("Waiting for results...")
+            try:
+                page.wait_for_selector('//a[contains(@href, "https://www.google.com/maps/place")]', timeout=30000)
+            except TimeoutError:
+                logging.warning("No results found or page took too long to load.")
+                # Dump HTML for debugging
+                with open("debug_no_results.html", "w", encoding="utf-8") as f:
+                    f.write(page.content())
+                return stats
+            
             page.hover('//a[contains(@href, "https://www.google.com/maps/place")]')
-            previously_counted = 0
-            while True:
+            
+            processed_count = 0
+            while len(places) < total:
+                # Scroll to load more if needed
                 page.mouse.wheel(0, 10000)
-                page.wait_for_selector('//a[contains(@href, "https://www.google.com/maps/place")]')
-                found = page.locator('//a[contains(@href, "https://www.google.com/maps/place")]').count()
-                logging.info(f"Currently Found: {found}")
-                if found >= total:
+                # Wait a bit for scroll to trigger load
+                page.wait_for_timeout(2000)
+                
+                # Get current count of listings
+                listings_locator = page.locator('//a[contains(@href, "https://www.google.com/maps/place")]')
+                current_count = listings_locator.count()
+                logging.info(f"Available listings: {current_count}, Processed: {processed_count}, Collected: {len(places)}")
+                
+                # If we've processed everything available so far
+                if processed_count >= current_count:
+                    logging.info("Reached end of current list. Waiting for more...")
+                    # Try to scroll again harder/wait longer
+                    page.mouse.wheel(0, 10000)
+                    page.wait_for_timeout(3000)
+                    
+                    new_count = listings_locator.count()
+                    if new_count <= current_count:
+                        logging.info("No new results loaded. Stopping.")
+                        break
+                    current_count = new_count
+
+                # Process new listings
+                # We can't loop from processed_count to current_count directly with `all()` because `all()` fetches everything.
+                # Instead, we use `nth(i)` to access specific elements without refetching the whole list as a Python list yet,
+                # OR we fetch all and slice. Fetching all is safer for references.
+                
+                # Re-fetch all to get fresh handles
+                all_listings = listings_locator.all()
+                
+                # Only iterate over what we haven't processed
+                # Note: If the list grew, indices 0..processed_count-1 should be the same items (Google Maps appends).
+                for i in range(processed_count, len(all_listings)):
+                    if len(places) >= total:
+                        break
+                        
+                    processed_count += 1
+                    
+                    try:
+                        listing = all_listings[i].locator("xpath=..")
+                        
+                        # Scroll into view to make sure it's clickable
+                        listing.scroll_into_view_if_needed()
+                        
+                        listing.click()
+                        # Wait for details to load
+                        try:
+                            page.wait_for_selector('//div[@class="TIHn2 "]//h1[@class="DUwDvf lfPIob"]', timeout=5000)
+                        except TimeoutError:
+                            logging.warning(f"Timeout waiting for details of listing {i+1}")
+                            continue
+
+                        time.sleep(1.0) 
+                        place = extract_place(page)
+                        
+                        # Deduplication
+                        unique_id = (place.name, place.address)
+                        if unique_id in seen_places:
+                            logging.info(f"Skipping duplicate: {place.name}")
+                            if callback:
+                                callback(len(places), total, f"Skipping duplicate: {place.name}")
+                            continue
+                        seen_places.add(unique_id)
+                        
+                        # Update stats
+                        stats["total_found"] = processed_count # Track how many we checked
+
+                        # Strict Area Filtering
+                        if required_area:
+                            if required_area.lower() not in place.address.lower():
+                                logging.info(f"Skipping {place.name}: Address '{place.address}' does not contain '{required_area}'")
+                                stats["filtered_count"] += 1
+                                if callback:
+                                     callback(len(places), total, f"Checking {processed_count}... (Filtered: {place.name})")
+                                continue
+
+                        if place.name:
+                            places.append(place)
+                            logging.info(f"Added {place.name}. Total collected: {len(places)}")
+                            if callback:
+                                callback(len(places), total, f"Found: {place.name}")
+                        else:
+                            logging.warning(f"No name found for listing {i+1}, skipping.")
+                            
+                    except Exception as e:
+                        logging.warning(f"Failed to extract listing {i+1}: {e}")
+                        
+                # End of inner loop (processed up to current_count or collected enough)
+                if len(places) >= total:
                     break
-                if found == previously_counted:
-                    logging.info("Arrived at all available")
-                    break
-                previously_counted = found
-            listings = page.locator('//a[contains(@href, "https://www.google.com/maps/place")]').all()[:total]
-            listings = [listing.locator("xpath=..") for listing in listings]
-            logging.info(f"Total Found: {len(listings)}")
-            for idx, listing in enumerate(listings):
-                try:
-                    listing.click()
-                    page.wait_for_selector('//div[@class="TIHn2 "]//h1[@class="DUwDvf lfPIob"]', timeout=10000)
-                    time.sleep(1.5)  # Give time for details to load
-                    place = extract_place(page)
-                    if place.name:
-                        places.append(place)
-                    else:
-                        logging.warning(f"No name found for listing {idx+1}, skipping.")
-                except Exception as e:
-                    logging.warning(f"Failed to extract listing {idx+1}: {e}")
+
+        except Exception as e:
+            logging.error(f"An error occurred: {e}")
+            page.screenshot(path="error_screenshot.png")
+            with open("debug.html", "w", encoding="utf-8") as f:
+                f.write(page.content())
+            raise e
         finally:
             browser.close()
-    return places
+            
+    stats["places"] = places
+    return stats
 
 def save_places_to_csv(places: List[Place], output_path: str = "result.csv", append: bool = False):
     df = pd.DataFrame([asdict(place) for place in places])
     if not df.empty:
-        for column in df.columns:
-            if df[column].nunique() == 1:
-                df.drop(column, axis=1, inplace=True)
+        # Check if we should drop columns with all same values (optional, but in original script)
+        # for column in df.columns:
+        #     if df[column].nunique() == 1:
+        #         df.drop(column, axis=1, inplace=True)
+        
         file_exists = os.path.isfile(output_path)
         mode = "a" if append else "w"
         header = not (append and file_exists)
-        df.to_csv(output_path, index=False, mode=mode, header=header)
+        df.to_csv(output_path, index=False, mode=mode, header=header, encoding="utf-8-sig")
         logging.info(f"Saved {len(df)} places to {output_path} (append={append})")
     else:
         logging.warning("No data to save. DataFrame is empty.")
@@ -177,11 +390,13 @@ def main():
     parser.add_argument("-o", "--output", type=str, default="result.csv", help="Output CSV file path")
     parser.add_argument("--append", action="store_true", help="Append results to the output file instead of overwriting")
     args = parser.parse_args()
-    search_for = args.search or "turkish stores in toronto Canada"
-    total = args.total or 1
+    
+    search_for = args.search or "real estate companies in Beirut"
+    total = args.total or 5
     output_path = args.output
     append = args.append
-    places = scrape_places(search_for, total)
+    
+    places = scrape_places(search_for, total)["places"]
     save_places_to_csv(places, output_path, append=append)
 
 if __name__ == "__main__":
