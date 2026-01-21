@@ -1,14 +1,17 @@
 import logging
 import os
-from typing import List, Optional
-from playwright.sync_api import sync_playwright, Page, TimeoutError
-from dataclasses import dataclass, asdict
-import pandas as pd
-import argparse
+import re
+import urllib.parse
 import platform
 import time
+import argparse
+import random
+import sys
+import subprocess
+from typing import List, Optional
+from dataclasses import dataclass, asdict
+from playwright.sync_api import sync_playwright, Page, TimeoutError, BrowserContext
 import pandas as pd
-import re
 
 @dataclass
 class Place:
@@ -42,6 +45,154 @@ def extract_text(page: Page, xpath: str) -> str:
     except Exception as e:
         logging.warning(f"Failed to extract text for xpath {xpath}: {e}")
     return ""
+
+def clean_business_name(name: str) -> str:
+    """
+    Cleans business name by removing tagline or description after common delimiters.
+    Example: "PBM : Real Estate in Lebanon" -> "PBM"
+    """
+    if not name:
+        return ""
+    
+    # Common delimiters used to separate name from description
+    delimiters = [':', '|', '–', ' - ', '•', ',', '.'] 
+    
+    cleaned_name = name
+    
+    for char in delimiters:
+        if char in name:
+            parts = name.split(char)
+            candidate = parts[0].strip()
+            # Heuristic: If the first part is substantial (e.g. > 2 chars), use it.
+            if len(candidate) > 1:
+                cleaned_name = candidate
+                break
+    
+    # Remove common corporate suffixes to improve search relevance
+    cleaned_name = re.sub(r'\s+(sarl|sal|inc|co|company|ltd|llc)\b.*', '', cleaned_name, flags=re.IGNORECASE).strip()
+
+    # Extra cleanup: specific words that might indicate a tagline if no delimiter
+    # e.g. "Matar Law Firm - Lawyers in Beirut" -> handled by delimiter
+    # "AtaBuild Lebanon Luxury Real Estate" -> "AtaBuild"
+    # Heuristic: If name is very long (> 5 words), take the first 2-3 words if they look like a name?
+    # But be careful with "Law Firm of X and Y"
+    
+    words = cleaned_name.split()
+    if len(words) > 6:
+        # Take first 4 words as a guess for a long tagline-like name
+        cleaned_name = " ".join(words[:4])
+        
+    return cleaned_name
+
+def search_web_for_instagram(context: BrowserContext, name: str, address: str) -> str:
+    """
+    Robust fallback search using Yahoo and Brave.
+    Bing and DuckDuckGo are currently blocking requests.
+    """
+    page = context.new_page()
+    found_link = ""
+    
+    try:
+        clean_name = clean_business_name(name)
+        
+        # Priority 1: Yahoo Search - Generally less strict
+        # Priority 2: Brave Search - Good alternative
+        # Priority 3: Bing - Backup (High block rate)
+        
+        queries = [
+            (f"{clean_name} {address} instagram", "yahoo"),
+            (f"{clean_name} Lebanon instagram", "yahoo"),
+            (f"{clean_name} instagram", "brave"),
+            (f"{clean_name} instagram", "bing")
+        ]
+        
+        # Deduplicate based on query string
+        unique_queries = []
+        seen = set()
+        for q, engine in queries:
+            if q not in seen:
+                unique_queries.append((q, engine))
+                seen.add(q)
+        
+        for query, engine in unique_queries:
+            # Add random delay to look human
+            sleep_time = random.uniform(2.0, 5.0)
+            # logging.info(f"Sleeping {sleep_time:.2f}s before {engine} search...")
+            time.sleep(sleep_time)
+
+            logging.info(f"Fallback Search ({engine}): {query}")
+            
+            try:
+                encoded_query = urllib.parse.quote(query)
+                search_url = ""
+                
+                if engine == "bing":
+                    search_url = f"https://www.bing.com/search?q={encoded_query}"
+                elif engine == "yahoo":
+                    search_url = f"https://search.yahoo.com/search?p={encoded_query}"
+                elif engine == "brave":
+                    search_url = f"https://search.brave.com/search?q={encoded_query}"
+                
+                page.goto(search_url, timeout=15000)
+                page.wait_for_timeout(2000)
+
+                # Yahoo Consent
+                if engine == "yahoo":
+                    try:
+                        if page.locator('button[name="agree"]').is_visible():
+                             page.locator('button[name="agree"]').click()
+                             page.wait_for_timeout(1000)
+                    except: pass
+                
+                # Bing Consent
+                if engine == "bing":
+                    try:
+                        if page.locator('#bnp_btn_accept').is_visible():
+                            page.locator('#bnp_btn_accept').click()
+                            page.wait_for_timeout(1000)
+                    except: pass
+
+                # Direct Search for Instagram links
+                # Wait briefly for results to populate
+                try:
+                    page.wait_for_selector('a[href*="instagram.com"]', timeout=3000)
+                except:
+                    pass 
+                
+                links = page.locator('a[href*="instagram.com"]').all()
+                
+                for link in links:
+                    if not link.is_visible():
+                        continue
+                    
+                    href = link.get_attribute('href')
+                    if not href:
+                        continue
+                    
+                    if "instagram.com" in href:
+                         # Filter noise
+                         if any(x in href for x in ["google.com", "bing.com", "microsoft.com", "duckduckgo.com", "yahoo.com", "search.yahoo", "brave.com", "/search", "/url?", "y.gif"]):
+                             continue
+                             
+                         # Validate profile
+                         if "/p/" not in href and "/reel/" not in href and "/explore/" not in href and "/tags/" not in href:
+                             # Ensure it's not just the root domain
+                             if href.strip('/').endswith("instagram.com"):
+                                 continue
+                                 
+                             found_link = href
+                             logging.info(f"Found Instagram via {engine}: {found_link}")
+                             return found_link
+            
+            except Exception as e:
+                logging.warning(f"{engine} search error for '{query}': {e}")
+            
+    except Exception as e:
+        logging.warning(f"Search failed for {name}: {e}")
+    finally:
+        page.close()
+    
+    return found_link
 
 def validate_lebanese_phone(phone_raw: str):
     """
@@ -89,7 +240,7 @@ def validate_lebanese_phone(phone_raw: str):
             
     return digits, "Unknown", False
 
-def extract_place(page: Page) -> Place:
+def extract_place(page: Page, context: BrowserContext = None) -> Place:
     # XPaths
     name_xpath = '//div[@class="TIHn2 "]//h1[@class="DUwDvf lfPIob"]'
     address_xpath = '//button[@data-item-id="address"]//div[contains(@class, "fontBodyMedium")]'
@@ -126,12 +277,75 @@ def extract_place(page: Page) -> Place:
         logging.warning(f"Failed to extract website href: {e}")
         place.website = extract_text(page, website_xpath) or "invalid"
 
+    # Scroll the details panel to ensure lazy-loaded elements (like Social Profiles) are rendered
+    try:
+        # Try to focus on the main panel
+        # The panel usually has role="main" and contains the place name
+        main_panel = page.locator('div[role="main"]').first
+        if main_panel.count() > 0:
+            main_panel.hover()
+            # Scroll down significantly
+            page.mouse.wheel(0, 3000)
+            time.sleep(1.0)
+            page.mouse.wheel(0, 3000)
+            time.sleep(1.0)
+        else:
+             # Fallback to keyboard
+            header_el = page.locator(name_xpath).first
+            if header_el.count() > 0:
+                header_el.click() # Focus
+                for _ in range(10): # Increased scroll amount
+                    page.keyboard.press("PageDown")
+                    time.sleep(0.1)
+    except Exception as e:
+        logging.warning(f"Failed to scroll details panel: {e}")
+
+    # Deep Scan for Instagram in the details panel (Social Profiles, Descriptions, etc.)
+    # We look for any link containing instagram.com that is visible
+    try:
+        # Use the main panel as scope to avoid picking up links from the results list (sidebar)
+        main_panel = page.locator('div[role="main"]').first
+        if main_panel.count() > 0:
+            scope = main_panel
+        else:
+            scope = page # Fallback, though risky
+            
+        # Strategy 1: Look for aria-labels (common in Google Maps for social icons)
+        social_aria = scope.locator('a[aria-label*="Instagram"], button[aria-label*="Instagram"]').all()
+        for el in social_aria:
+            href = el.get_attribute('href')
+            if href and "instagram.com" in href:
+                place.instagram = href
+                logging.info(f"Found Instagram via Aria Label: {href}")
+                break
+        
+        if not place.instagram:
+            # Strategy 2: Scan all links within the scope
+            # Use CSS selector 'a' to ensure we only find descendants of the scope
+            social_links = scope.locator('a').all()
+            for link in social_links:
+                if not link.is_visible():
+                    continue
+                href = link.get_attribute('href')
+                if href and "instagram.com" in href:
+                    if "google.com" not in href:
+                         place.instagram = href
+                         logging.info(f"Found Instagram via Deep Scan: {href}")
+                         break 
+    except Exception as e:
+        logging.warning(f"Deep scan for Instagram failed: {e}")
+
     # Double check if fallback extraction got a social link
     if "instagram.com" in place.website:
         place.instagram = place.website
         place.website = "invalid"
     elif "facebook.com" in place.website:
         place.website = "invalid"
+
+    # Fallback: Google Search if Instagram is still missing and context is provided
+    if not place.instagram and context and place.name:
+        # Only search if we have a name
+        place.instagram = search_web_for_instagram(context, place.name, place.address)
 
     place.phone_number = extract_text(page, phone_number_xpath)
     
@@ -211,7 +425,7 @@ def handle_consent(page: Page):
     except Exception as e:
         logging.warning(f"Consent handling failed: {e}")
 
-def scrape_places(search_for: str, total: int, callback=None, required_area: str = None) -> dict:
+def scrape_places(search_for: str, total: int, callback=None, required_area: str = None, excluded_areas: List[str] = None) -> dict:
     setup_logging()
     places: List[Place] = []
     seen_places = set()
@@ -233,13 +447,11 @@ def scrape_places(search_for: str, total: int, callback=None, required_area: str
                 # Install all default browsers (includes chromium and headless-shell)
                 # Using sys.executable ensures we use the same python environment
                 subprocess.run([sys.executable, "-m", "playwright", "install"], check=True)
-                # Also try installing dependencies just in case (though packages.txt handles system deps)
-                # subprocess.run([sys.executable, "-m", "playwright", "install-deps"], check=True) 
                 
                 browser = p.chromium.launch(headless=True)
             except Exception as install_error:
                 logging.error(f"Failed to install/launch browser after update: {install_error}")
-                raise e # Raise original error if installation fails
+                raise e 
             
         # Create a context with specific user agent
         context = browser.new_context(
@@ -264,9 +476,6 @@ def scrape_places(search_for: str, total: int, callback=None, required_area: str
                 page.wait_for_selector('//a[contains(@href, "https://www.google.com/maps/place")]', timeout=30000)
             except TimeoutError:
                 logging.warning("No results found or page took too long to load.")
-                # Dump HTML for debugging
-                with open("debug_no_results.html", "w", encoding="utf-8") as f:
-                    f.write(page.content())
                 return stats
             
             page.hover('//a[contains(@href, "https://www.google.com/maps/place")]')
@@ -327,7 +536,7 @@ def scrape_places(search_for: str, total: int, callback=None, required_area: str
                             continue
 
                         time.sleep(1.0) 
-                        place = extract_place(page)
+                        place = extract_place(page, context)
                         
                         # Deduplication
                         unique_id = (place.name, place.address)
@@ -349,6 +558,28 @@ def scrape_places(search_for: str, total: int, callback=None, required_area: str
                                 if callback:
                                      callback(len(places), total, f"Checking {processed_count}... (Filtered: {place.name})")
                                 continue
+                        
+                        # Excluded Areas Filtering (e.g. don't show Jounieh results for Beirut)
+                        if excluded_areas:
+                            found_exclusion = False
+                            for excl in excluded_areas:
+                                # Simple check: if excluded area is in address
+                                # But be careful: "Tripoli Street" in Beirut shouldn't filter out Beirut.
+                                # So only filter if the excluded area is present AND the required_area is NOT clearly the main city.
+                                # Actually, simpler: If excluded area is in address, we suspect it's wrong.
+                                # Exception: If required_area is also present, it's ambiguous.
+                                # But user reported "Jounieh" appearing in "Beirut" search.
+                                # So if "Jounieh" is in address, we should skip, even if "Beirut" is there (e.g. Beirut Highway).
+                                
+                                if excl.lower() in place.address.lower():
+                                    logging.info(f"Skipping {place.name}: Address '{place.address}' contains excluded area '{excl}'")
+                                    stats["filtered_count"] += 1
+                                    if callback:
+                                         callback(len(places), total, f"Checking {processed_count}... (Filtered: {place.name} - {excl})")
+                                    found_exclusion = True
+                                    break
+                            if found_exclusion:
+                                continue
 
                         if place.name:
                             places.append(place)
@@ -367,9 +598,6 @@ def scrape_places(search_for: str, total: int, callback=None, required_area: str
 
         except Exception as e:
             logging.error(f"An error occurred: {e}")
-            page.screenshot(path="error_screenshot.png")
-            with open("debug.html", "w", encoding="utf-8") as f:
-                f.write(page.content())
             raise e
         finally:
             browser.close()
@@ -380,11 +608,6 @@ def scrape_places(search_for: str, total: int, callback=None, required_area: str
 def save_places_to_csv(places: List[Place], output_path: str = "result.csv", append: bool = False):
     df = pd.DataFrame([asdict(place) for place in places])
     if not df.empty:
-        # Check if we should drop columns with all same values (optional, but in original script)
-        # for column in df.columns:
-        #     if df[column].nunique() == 1:
-        #         df.drop(column, axis=1, inplace=True)
-        
         file_exists = os.path.isfile(output_path)
         mode = "a" if append else "w"
         header = not (append and file_exists)

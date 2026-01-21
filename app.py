@@ -78,15 +78,31 @@ if submitted:
         # Extract strict area name (e.g. "Sidon (Saida)" -> "Sidon")
         # If user typed custom area, use it as is.
         strict_area_filter = None
+        excluded_areas_list = []
+        
         if area_input:
             # If it comes from the dropdown list, it might have parens
             if "(" in area_input:
                 strict_area_filter = area_input.split("(")[0].strip()
             else:
                 strict_area_filter = area_input
+                
+            # Build exclusion list (all other areas from the main list)
+            # This prevents "Jounieh" results from appearing in "Beirut" searches
+            # (e.g. "Beirut Highway, Jounieh")
+            for area in AREAS:
+                clean_area = area.split("(")[0].strip()
+                if clean_area.lower() != strict_area_filter.lower():
+                    excluded_areas_list.append(clean_area)
 
         # Run the scraper
-        result = scrape_places(search_query, total_results, callback=progress_callback, required_area=strict_area_filter)
+        result = scrape_places(
+            search_query, 
+            total_results, 
+            callback=progress_callback, 
+            required_area=strict_area_filter,
+            excluded_areas=excluded_areas_list
+        )
         places = result["places"]
         
         # Finish progress bar
