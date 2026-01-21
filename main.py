@@ -228,8 +228,18 @@ def scrape_places(search_for: str, total: int, callback=None, required_area: str
             logging.warning(f"Could not launch browser directly: {e}")
             logging.info("Attempting to install Playwright browsers...")
             import subprocess
-            subprocess.run(["python", "-m", "playwright", "install", "chromium"])
-            browser = p.chromium.launch(headless=True)
+            import sys
+            try:
+                # Install all default browsers (includes chromium and headless-shell)
+                # Using sys.executable ensures we use the same python environment
+                subprocess.run([sys.executable, "-m", "playwright", "install"], check=True)
+                # Also try installing dependencies just in case (though packages.txt handles system deps)
+                # subprocess.run([sys.executable, "-m", "playwright", "install-deps"], check=True) 
+                
+                browser = p.chromium.launch(headless=True)
+            except Exception as install_error:
+                logging.error(f"Failed to install/launch browser after update: {install_error}")
+                raise e # Raise original error if installation fails
             
         # Create a context with specific user agent
         context = browser.new_context(
