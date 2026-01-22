@@ -25,12 +25,8 @@ class Place:
     instagram: str = ""
     reviews_count: Optional[int] = None
     reviews_average: Optional[float] = None
-    store_shopping: str = "No"
-    in_store_pickup: str = "No"
-    store_delivery: str = "No"
     place_type: str = ""
     opens_at: str = ""
-    introduction: str = ""
 
 def setup_logging():
     logging.basicConfig(
@@ -84,11 +80,100 @@ def clean_business_name(name: str) -> str:
         
     return cleaned_name
 
-def search_web_for_instagram(context: BrowserContext, name: str, address: str) -> str:
+def verify_instagram_match(business_name: str, url: str) -> bool:
+    """
+    Verifies if the Instagram URL is likely to belong to the business.
+    """
+    if not url or "instagram.com" not in url:
+        return False
+        
+    # Extract username
+    match = re.search(r"instagram\.com/([^/?#]+)", url)
+    if not match:
+        return False
+    
+    username = match.group(1).lower()
+    
+    # Normalize business name
+    # Replace special chars with SPACE to preserve word boundaries (e.g. "All-ways" -> "All ways")
+    name_clean = re.sub(r"[^a-zA-Z0-9\s]", " ", business_name.lower())
+    tokens = name_clean.split()
+    
+    # Filter out weak tokens that might generate false positives
+    weak_tokens = {
+        "lebanon", "lb", "beirut", "company", "co", "ltd", "sarl", "sal", 
+        "agency", "travel", "tourism", "real", "estate", "group", "holding",
+        "shop", "store", "restaurant", "hotel", "cafe", "lounge", "bar",
+        "services", "trading", "contracting", "engineering", "design", "media",
+        "pharma", "pharmacy", "clinic", "dr", "center", "centre", "market",
+        "supermarket", "gym", "spa", "beauty", "salon", "lounge", "boutique",
+        "fashion", "style", "home", "house", "decor", "interiors", "furniture",
+        "kitchen", "bakery", "pastry", "sweets", "roastery", "jewellery", "jewelry",
+        "exchange", "transfer", "money", "bank", "insurance", "law", "legal",
+        "firm", "associates", "consultancy", "consulting", "schools", "school",
+        "university", "college", "academy", "institute", "education", "learning",
+        "nursery", "kids", "child", "care", "health", "medical", "dental",
+        "dentist", "doctor", "physio", "optical", "optics", "vision", "eye",
+        "hospital", "laboratory", "lab", "imaging", "scan", "xray", "auto",
+        "car", "cars", "rental", "rent", "drive", "motors", "motor", "cycle",
+        "bike", "mechanic", "garage", "fix", "repair", "tech", "technology",
+        "solutions", "systems", "soft", "software", "app", "mobile", "phone",
+        "cell", "tel", "telecom", "net", "network", "online", "web", "digital",
+        "marketing", "social", "events", "planning", "wedding", "party",
+        "catering", "food", "drink", "beverage", "snack", "grill", "burger",
+        "pizza", "sushi", "pasta", "seafood", "fish", "meat", "chicken",
+        "taouk", "shawarma", "falafel", "manakish", "lebanese", "cuisine",
+        "international", "diner", "bistro", "pub", "club", "resort", "beach",
+        "pool", "view", "terrace", "garden", "park", "plaza", "mall", "city",
+        "town", "village", "street", "road", "highway", "main", "branch",
+        "holidays", "holiday", "tour", "tours", "trip", "trips", "booking",
+        "reservation", "ticket", "tickets", "visa", "visas", "cargo", "freight",
+        "the", "and", "for", "of", "in", "at", "by", "to"
+    }
+    
+    strong_tokens = [t for t in tokens if t not in weak_tokens and len(t) > 2]
+    
+    # If no strong tokens (e.g. "The Travel Agency"), fall back to checking all tokens but require stricter match
+    if not strong_tokens:
+        # Fallback: if business name is short but specific (e.g. "ABC Travel")
+        # and we stripped "Travel", we might be left with "ABC".
+        # If the original token was short but not weak, maybe keep it?
+        strong_tokens = [t for t in tokens if t not in weak_tokens]
+        
+    if not strong_tokens:
+        return False # Name is too generic
+        
+    # Check if ANY strong token is present in the username
+    # Normalize username to remove dots/underscores for easier matching
+    # e.g. "all.ways.travel" -> "allwaystravel"
+    username_clean = re.sub(r"[^a-zA-Z0-9]", "", username)
+    
+    # Improved Check:
+    # 1. Exact match of a strong token
+    # 2. Sequential match of tokens (e.g. "All-ways" -> "all" + "ways" in sequence)
+    
+    # Concatenate strong tokens to check for full name match
+    strong_concat = "".join(strong_tokens)
+    if strong_concat in username_clean:
+        return True
+        
+    # Check individual strong tokens
+    for token in strong_tokens:
+        if token in username_clean:
+            # If the token is very short (3 chars), ensure it's not part of a common suffix?
+            # But for now, trust the strong list.
+            return True
+            
+    return False
+
+def search_web_for_instagram(context: BrowserContext, name: str, address: str, should_stop_callback=None) -> str:
     """
     Robust fallback search using Yahoo and Brave.
     Bing and DuckDuckGo are currently blocking requests.
     """
+    if should_stop_callback and should_stop_callback():
+        return ""
+
     page = context.new_page()
     found_link = ""
     
@@ -115,6 +200,10 @@ def search_web_for_instagram(context: BrowserContext, name: str, address: str) -
                 seen.add(q)
         
         for query, engine in unique_queries:
+            if should_stop_callback and should_stop_callback():
+                logging.info("Stopping fallback search due to user interrupt.")
+                break
+
             # Add random delay to look human
             sleep_time = random.uniform(2.0, 5.0)
             # logging.info(f"Sleeping {sleep_time:.2f}s before {engine} search...")
@@ -180,6 +269,11 @@ def search_web_for_instagram(context: BrowserContext, name: str, address: str) -
                              if href.strip('/').endswith("instagram.com"):
                                  continue
                                  
+                             # Verify match
+                             if not verify_instagram_match(name, href):
+                                 logging.info(f"Rejected mismatching Instagram: {href} for {name}")
+                                 continue
+
                              found_link = href
                              logging.info(f"Found Instagram via {engine}: {found_link}")
                              return found_link
@@ -240,7 +334,7 @@ def validate_lebanese_phone(phone_raw: str):
             
     return digits, "Unknown", False
 
-def extract_place(page: Page, context: BrowserContext = None) -> Place:
+def extract_place(page: Page, context: BrowserContext = None, should_stop_callback=None) -> Place:
     # XPaths
     name_xpath = '//div[@class="TIHn2 "]//h1[@class="DUwDvf lfPIob"]'
     address_xpath = '//button[@data-item-id="address"]//div[contains(@class, "fontBodyMedium")]'
@@ -248,16 +342,16 @@ def extract_place(page: Page, context: BrowserContext = None) -> Place:
     phone_number_xpath = '//button[contains(@data-item-id, "phone:tel:")]//div[contains(@class, "fontBodyMedium")]'
     reviews_count_xpath = '//div[@class="TIHn2 "]//div[@class="fontBodyMedium dmRWX"]//div//span//span//span[@aria-label]'
     reviews_average_xpath = '//div[@class="TIHn2 "]//div[@class="fontBodyMedium dmRWX"]//div//span[@aria-hidden]'
-    info1 = '//div[@class="LTs0Rc"][1]'
-    info2 = '//div[@class="LTs0Rc"][2]'
-    info3 = '//div[@class="LTs0Rc"][3]'
     opens_at_xpath = '//button[contains(@data-item-id, "oh")]//div[contains(@class, "fontBodyMedium")]'
     opens_at_xpath2 = '//div[@class="MkV9"]//span[@class="ZDu9vd"]//span[2]'
     place_type_xpath = '//div[@class="LBgpqf"]//button[@class="DkEaL "]'
-    intro_xpath = '//div[@class="WeS02d fontBodyMedium"]//div[@class="PYvSYb "]'
 
     place = Place()
     place.name = extract_text(page, name_xpath)
+    
+    if should_stop_callback and should_stop_callback():
+        return place
+        
     place.address = extract_text(page, address_xpath)
     
     # Extract website href
@@ -265,8 +359,12 @@ def extract_place(page: Page, context: BrowserContext = None) -> Place:
         if page.locator('//a[@data-item-id="authority"]').count() > 0:
             url = page.locator('//a[@data-item-id="authority"]').get_attribute('href') or ""
             if "instagram.com" in url:
-                place.instagram = url
-                place.website = "invalid"
+                if verify_instagram_match(place.name, url):
+                    place.instagram = url
+                    place.website = "invalid"
+                else:
+                    place.website = "invalid"
+                    logging.info(f"Rejected website mismatch: {url} for {place.name}")
             elif "facebook.com" in url:
                 place.website = "invalid"
             else:
@@ -276,6 +374,9 @@ def extract_place(page: Page, context: BrowserContext = None) -> Place:
     except Exception as e:
         logging.warning(f"Failed to extract website href: {e}")
         place.website = extract_text(page, website_xpath) or "invalid"
+
+    if should_stop_callback and should_stop_callback():
+        return place
 
     # Scroll the details panel to ensure lazy-loaded elements (like Social Profiles) are rendered
     try:
@@ -315,9 +416,12 @@ def extract_place(page: Page, context: BrowserContext = None) -> Place:
         for el in social_aria:
             href = el.get_attribute('href')
             if href and "instagram.com" in href:
-                place.instagram = href
-                logging.info(f"Found Instagram via Aria Label: {href}")
-                break
+                if verify_instagram_match(place.name, href):
+                    place.instagram = href
+                    logging.info(f"Found Instagram via Aria Label: {href}")
+                    break
+                else:
+                    logging.info(f"Rejected Aria Label mismatch: {href} for {place.name}")
         
         if not place.instagram:
             # Strategy 2: Scan all links within the scope
@@ -329,23 +433,32 @@ def extract_place(page: Page, context: BrowserContext = None) -> Place:
                 href = link.get_attribute('href')
                 if href and "instagram.com" in href:
                     if "google.com" not in href:
-                         place.instagram = href
-                         logging.info(f"Found Instagram via Deep Scan: {href}")
-                         break 
+                         if verify_instagram_match(place.name, href):
+                             place.instagram = href
+                             logging.info(f"Found Instagram via Deep Scan: {href}")
+                             break
+                         else:
+                             logging.info(f"Rejected Deep Scan mismatch: {href} for {place.name}") 
     except Exception as e:
         logging.warning(f"Deep scan for Instagram failed: {e}")
 
     # Double check if fallback extraction got a social link
     if "instagram.com" in place.website:
-        place.instagram = place.website
-        place.website = "invalid"
+        if verify_instagram_match(place.name, place.website):
+            place.instagram = place.website
+            place.website = "invalid"
+        else:
+            place.website = "invalid"
     elif "facebook.com" in place.website:
         place.website = "invalid"
+
+    if should_stop_callback and should_stop_callback():
+        return place
 
     # Fallback: Google Search if Instagram is still missing and context is provided
     if not place.instagram and context and place.name:
         # Only search if we have a name
-        place.instagram = search_web_for_instagram(context, place.name, place.address)
+        place.instagram = search_web_for_instagram(context, place.name, place.address, should_stop_callback)
 
     place.phone_number = extract_text(page, phone_number_xpath)
     
@@ -356,7 +469,6 @@ def extract_place(page: Page, context: BrowserContext = None) -> Place:
     place.is_valid_phone = valid
     
     place.place_type = extract_text(page, place_type_xpath)
-    place.introduction = extract_text(page, intro_xpath) or "None Found"
 
     # Reviews Count
     reviews_count_raw = extract_text(page, reviews_count_xpath)
@@ -374,19 +486,6 @@ def extract_place(page: Page, context: BrowserContext = None) -> Place:
             place.reviews_average = float(temp)
         except Exception as e:
             logging.warning(f"Failed to parse reviews average: {e}")
-    # Store Info
-    for idx, info_xpath in enumerate([info1, info2, info3]):
-        info_raw = extract_text(page, info_xpath)
-        if info_raw:
-            temp = info_raw.split('·')
-            if len(temp) > 1:
-                check = temp[1].replace("\n", "").lower()
-                if 'shop' in check:
-                    place.store_shopping = "Yes"
-                if 'pickup' in check:
-                    place.in_store_pickup = "Yes"
-                if 'delivery' in check:
-                    place.store_delivery = "Yes"
     # Opens At
     opens_at_raw = extract_text(page, opens_at_xpath)
     if opens_at_raw:
@@ -425,185 +524,226 @@ def handle_consent(page: Page):
     except Exception as e:
         logging.warning(f"Consent handling failed: {e}")
 
-def scrape_places(search_for: str, total: int, callback=None, required_area: str = None, excluded_areas: List[str] = None) -> dict:
-    setup_logging()
-    places: List[Place] = []
-    seen_places = set()
-    stats = {
-        "total_found": 0,
-        "filtered_count": 0,
-        "places": []
-    }
-    with sync_playwright() as p:
-        browser = None
+class GoogleMapsScraper:
+    def __init__(self):
+        self.playwright = None
+        self.browser = None
+        self.context = None
+        self.page = None
+        self.places = []
+        self.processed_count = 0
+        self.stats = {"total_found": 0, "filtered_count": 0, "places": []}
+        self.is_running = False
+        self.search_for = ""
+        self.total_target = 0
+        self.required_area = None
+        self.allowed_areas = []
+        self.excluded_areas = []
+        
+    def start(self, search_for: str, total: int, required_area: str = None, excluded_areas: List[str] = None, allowed_areas: List[str] = None):
+        setup_logging()
+        self.search_for = search_for
+        self.total_target = total
+        self.required_area = required_area
+        self.allowed_areas = allowed_areas or []
+        self.excluded_areas = excluded_areas or []
+        self.places = []
+        self.processed_count = 0
+        self.stats = {"total_found": 0, "filtered_count": 0, "places": []}
+        
+        self.playwright = sync_playwright().start()
+        
         try:
-            browser = p.chromium.launch(headless=True)
-        except Exception as e:
-            logging.warning(f"Could not launch browser directly: {e}")
-            logging.info("Attempting to install Playwright browsers...")
+            self.browser = self.playwright.chromium.launch(headless=True)
+        except Exception:
+            # Fallback for installation issues
             import subprocess
             import sys
+            logging.info("Browser launch failed. Attempting to install Playwright Chromium...")
             try:
-                # Install all default browsers (includes chromium and headless-shell)
-                # Using sys.executable ensures we use the same python environment
-                subprocess.run([sys.executable, "-m", "playwright", "install"], check=True)
-                
-                browser = p.chromium.launch(headless=True)
-            except Exception as install_error:
-                logging.error(f"Failed to install/launch browser after update: {install_error}")
-                raise e 
+                subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+                self.browser = self.playwright.chromium.launch(headless=True)
+            except Exception as e:
+                logging.error(f"Failed to install/launch browser: {e}")
+                raise e
             
-        # Create a context with specific user agent
-        context = browser.new_context(
+        self.context = self.browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
-        page = context.new_page()
+        self.page = self.context.new_page()
+        
+        # Navigate
+        import urllib.parse
+        encoded_query = urllib.parse.quote(search_for)
+        url = f"https://www.google.com/maps/search/{encoded_query}?hl=en"
+        
+        logging.info(f"Navigating to {url}")
+        self.page.goto(url, timeout=60000)
+        self.page.wait_for_timeout(5000)
+        
+        handle_consent(self.page)
+        
+        # Initial wait for results
         try:
-            # Navigate directly to the search results
-            import urllib.parse
-            encoded_query = urllib.parse.quote(search_for)
-            url = f"https://www.google.com/maps/search/{encoded_query}?hl=en"
+            self.page.wait_for_selector('//a[contains(@href, "https://www.google.com/maps/place")]', timeout=30000)
+        except TimeoutError:
+            logging.warning("No results found.")
+            return False
             
-            logging.info(f"Navigating to {url}")
-            page.goto(url, timeout=60000)
-            page.wait_for_timeout(5000)
-            
-            handle_consent(page)
+        self.page.hover('//a[contains(@href, "https://www.google.com/maps/place")]')
+        self.is_running = True
+        return True
 
-            # Wait for results to appear
-            logging.info("Waiting for results...")
+    def stop(self):
+        """
+        Stops the scraper and closes the browser.
+        """
+        self.is_running = False
+        if self.context:
             try:
-                page.wait_for_selector('//a[contains(@href, "https://www.google.com/maps/place")]', timeout=30000)
-            except TimeoutError:
-                logging.warning("No results found or page took too long to load.")
-                return stats
+                self.context.close()
+            except:
+                pass
+        if self.browser:
+            try:
+                self.browser.close()
+            except:
+                pass
+        if self.playwright:
+            try:
+                self.playwright.stop()
+            except:
+                pass
+        logging.info("Scraper stopped.")
+
+    def step(self, should_stop_callback=None) -> Optional[Place]:
+        """
+        Performs one step of scraping:
+        - Checks if we need to scroll
+        - Processes the next available listing
+        - Returns the Place object if found, or None if just scrolling/waiting
+        """
+        if not self.is_running or len(self.places) >= self.total_target:
+            return None
+        
+        if should_stop_callback and should_stop_callback():
+             logging.info("Step interrupted by user stop request.")
+             return None
+
+        # Get current listings
+        listings_locator = self.page.locator('//a[contains(@href, "https://www.google.com/maps/place")]')
+        current_count = listings_locator.count()
+        
+        # If we need more listings and have processed all current ones
+        if self.processed_count >= current_count:
+            logging.info("Scrolling for more results...")
+            self.page.mouse.wheel(0, 10000)
+            self.page.wait_for_timeout(3000)
             
-            page.hover('//a[contains(@href, "https://www.google.com/maps/place")]')
+            # Check if count increased
+            new_count = listings_locator.count()
+            if new_count <= current_count:
+                # End of list or load failed
+                logging.info("No new results after scroll.")
+                # We return None to indicate no place found this step, 
+                # but we might want to try scrolling again or stop.
+                # For now, let's try one more wait or just return None.
+                return None
+            return None # Just scrolled, return to let loop continue
+
+        # Process the next listing
+        try:
+            listing = listings_locator.nth(self.processed_count)
+            listing.click()
+            self.page.wait_for_timeout(2000)
             
-            processed_count = 0
-            while len(places) < total:
-                # Scroll to load more if needed
-                page.mouse.wheel(0, 10000)
-                # Wait a bit for scroll to trigger load
-                page.wait_for_timeout(2000)
-                
-                # Get current count of listings
-                listings_locator = page.locator('//a[contains(@href, "https://www.google.com/maps/place")]')
-                current_count = listings_locator.count()
-                logging.info(f"Available listings: {current_count}, Processed: {processed_count}, Collected: {len(places)}")
-                
-                # If we've processed everything available so far
-                if processed_count >= current_count:
-                    logging.info("Reached end of current list. Waiting for more...")
-                    # Try to scroll again harder/wait longer
-                    page.mouse.wheel(0, 10000)
-                    page.wait_for_timeout(3000)
-                    
-                    new_count = listings_locator.count()
-                    if new_count <= current_count:
-                        logging.info("No new results loaded. Stopping.")
+            if should_stop_callback and should_stop_callback():
+                logging.info("Step interrupted by user stop request during processing.")
+                return None
+            
+            place = extract_place(self.page, self.context, should_stop_callback)
+            self.processed_count += 1
+            
+            # Filter Logic
+            self.stats["total_found"] += 1
+            
+            # 1. Area Filter
+            if self.allowed_areas:
+                # If we have a specific list of allowed sub-areas (including the main area)
+                # Check if ANY of them are in the address
+                matched_area = False
+                for area in self.allowed_areas:
+                    if area.lower() in place.address.lower():
+                        matched_area = True
                         break
-                    current_count = new_count
-
-                # Process new listings
-                # We can't loop from processed_count to current_count directly with `all()` because `all()` fetches everything.
-                # Instead, we use `nth(i)` to access specific elements without refetching the whole list as a Python list yet,
-                # OR we fetch all and slice. Fetching all is safer for references.
                 
-                # Re-fetch all to get fresh handles
-                all_listings = listings_locator.all()
-                
-                # Only iterate over what we haven't processed
-                # Note: If the list grew, indices 0..processed_count-1 should be the same items (Google Maps appends).
-                for i in range(processed_count, len(all_listings)):
-                    if len(places) >= total:
-                        break
-                        
-                    processed_count += 1
-                    
-                    try:
-                        listing = all_listings[i].locator("xpath=..")
-                        
-                        # Scroll into view to make sure it's clickable
-                        listing.scroll_into_view_if_needed()
-                        
-                        listing.click()
-                        # Wait for details to load
-                        try:
-                            page.wait_for_selector('//div[@class="TIHn2 "]//h1[@class="DUwDvf lfPIob"]', timeout=5000)
-                        except TimeoutError:
-                            logging.warning(f"Timeout waiting for details of listing {i+1}")
-                            continue
-
-                        time.sleep(1.0) 
-                        place = extract_place(page, context)
-                        
-                        # Deduplication
-                        unique_id = (place.name, place.address)
-                        if unique_id in seen_places:
-                            logging.info(f"Skipping duplicate: {place.name}")
-                            if callback:
-                                callback(len(places), total, f"Skipping duplicate: {place.name}")
-                            continue
-                        seen_places.add(unique_id)
-                        
-                        # Update stats
-                        stats["total_found"] = processed_count # Track how many we checked
-
-                        # Strict Area Filtering
-                        if required_area:
-                            if required_area.lower() not in place.address.lower():
-                                logging.info(f"Skipping {place.name}: Address '{place.address}' does not contain '{required_area}'")
-                                stats["filtered_count"] += 1
-                                if callback:
-                                     callback(len(places), total, f"Checking {processed_count}... (Filtered: {place.name})")
-                                continue
-                        
-                        # Excluded Areas Filtering (e.g. don't show Jounieh results for Beirut)
-                        if excluded_areas:
-                            found_exclusion = False
-                            for excl in excluded_areas:
-                                # Simple check: if excluded area is in address
-                                # But be careful: "Tripoli Street" in Beirut shouldn't filter out Beirut.
-                                # So only filter if the excluded area is present AND the required_area is NOT clearly the main city.
-                                # Actually, simpler: If excluded area is in address, we suspect it's wrong.
-                                # Exception: If required_area is also present, it's ambiguous.
-                                # But user reported "Jounieh" appearing in "Beirut" search.
-                                # So if "Jounieh" is in address, we should skip, even if "Beirut" is there (e.g. Beirut Highway).
-                                
-                                if excl.lower() in place.address.lower():
-                                    logging.info(f"Skipping {place.name}: Address '{place.address}' contains excluded area '{excl}'")
-                                    stats["filtered_count"] += 1
-                                    if callback:
-                                         callback(len(places), total, f"Checking {processed_count}... (Filtered: {place.name} - {excl})")
-                                    found_exclusion = True
-                                    break
-                            if found_exclusion:
-                                continue
-
-                        if place.name:
-                            places.append(place)
-                            logging.info(f"Added {place.name}. Total collected: {len(places)}")
-                            if callback:
-                                callback(len(places), total, f"Found: {place.name}")
-                        else:
-                            logging.warning(f"No name found for listing {i+1}, skipping.")
-                            
-                    except Exception as e:
-                        logging.warning(f"Failed to extract listing {i+1}: {e}")
-                        
-                # End of inner loop (processed up to current_count or collected enough)
-                if len(places) >= total:
-                    break
-
+                if not matched_area:
+                    self.stats["filtered_count"] += 1
+                    logging.info(f"Skipped {place.name}: Address '{place.address}' not in allowed areas {self.allowed_areas}")
+                    return None
+            
+            elif self.required_area:
+                # Legacy single area check
+                if self.required_area.lower() not in place.address.lower():
+                    self.stats["filtered_count"] += 1
+                    logging.info(f"Skipped {place.name}: Address '{place.address}' missing '{self.required_area}'")
+                    return None # Filtered out
+            
+            # 2. Excluded Areas Filter
+            if self.excluded_areas:
+                for excluded in self.excluded_areas:
+                    if excluded.lower() in place.address.lower():
+                        self.stats["filtered_count"] += 1
+                        logging.info(f"Skipped {place.name}: Address '{place.address}' contains excluded '{excluded}'")
+                        return None # Filtered out
+            
+            # Valid Place
+            self.places.append(place)
+            self.stats["places"].append(place)
+            return place
+            
         except Exception as e:
-            logging.error(f"An error occurred: {e}")
-            raise e
-        finally:
-            browser.close()
-            
-    stats["places"] = places
-    return stats
+            logging.error(f"Error processing listing {self.processed_count}: {e}")
+            self.processed_count += 1
+            return None
+
+    def stop(self):
+        self.is_running = False
+        if self.context:
+            self.context.close()
+        if self.browser:
+            self.browser.close()
+        if self.playwright:
+            self.playwright.stop()
+
+# Keep the original function for backward compatibility if needed, 
+# or redirect it to use the class (simplified).
+def scrape_places(search_for: str, total: int, callback=None, required_area: str = None, excluded_areas: List[str] = None) -> dict:
+    scraper = GoogleMapsScraper()
+    success = scraper.start(search_for, total, required_area, excluded_areas)
+    if not success:
+        scraper.stop()
+        return scraper.stats
+        
+    while len(scraper.places) < total:
+        place = scraper.step()
+        if place:
+            if callback:
+                callback(len(scraper.places), total, f"Found {place.name}")
+        
+        # Check if we are stuck (processed all but no new places) - simplistic check
+        listings_count = scraper.page.locator('//a[contains(@href, "https://www.google.com/maps/place")]').count()
+        if scraper.processed_count >= listings_count:
+             # Try scroll
+             scraper.page.mouse.wheel(0, 10000)
+             scraper.page.wait_for_timeout(2000)
+             if scraper.page.locator('//a[contains(@href, "https://www.google.com/maps/place")]').count() <= listings_count:
+                 break
+
+    scraper.stop()
+    return scraper.stats
+
+
 
 def save_places_to_csv(places: List[Place], output_path: str = "result.csv", append: bool = False):
     df = pd.DataFrame([asdict(place) for place in places])

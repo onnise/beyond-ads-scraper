@@ -1,151 +1,413 @@
 import streamlit as st
 import pandas as pd
 from dataclasses import asdict
-from main import scrape_places
+from main import GoogleMapsScraper
+from locations import AREA_MAPPINGS
 import time
 import asyncio
 import sys
+import base64
+import os
+import io
+import openpyxl
+from openpyxl.styles import Font
+from openpyxl.utils import get_column_letter
+
+import threading
+import logging
 
 # Fix for Windows asyncio loop policy
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-st.set_page_config(page_title="Beyond Ads Scraper", page_icon="🚀")
+st.set_page_config(page_title="Beyond Ads Scraper", page_icon="🚀", layout="wide")
+
+# -------------------------------------------------------
+# Scraper Thread Function
+# -------------------------------------------------------
+def run_scraper_thread(search_query, total_target, required_area, excluded_areas, allowed_areas, results_list, stop_event):
+    scraper = GoogleMapsScraper()
+    success = scraper.start(search_query, total_target, required_area, excluded_areas, allowed_areas)
+    
+    if not success:
+        return
+
+    while len(scraper.places) < total_target and not stop_event.is_set():
+        # Perform one step
+        item = scraper.step(should_stop_callback=stop_event.is_set)
+        
+        if item:
+            # Thread-safe append (lists are thread-safe in CPython for append)
+            results_list.append(asdict(item))
+        
+        # Check if scraper is stuck or finished (replicating logic from main.py)
+        # Also check stop event here just in case
+        if stop_event.is_set():
+            break
+        listings_locator = scraper.page.locator('//a[contains(@href, "https://www.google.com/maps/place")]')
+        try:
+            listings_count = listings_locator.count()
+            if scraper.processed_count >= listings_count:
+                # Try scroll
+                scraper.page.mouse.wheel(0, 10000)
+                scraper.page.wait_for_timeout(2000)
+                if scraper.page.locator('//a[contains(@href, "https://www.google.com/maps/place")]').count() <= listings_count:
+                    # No new results after scroll
+                    break
+        except:
+            break
+            
+        time.sleep(0.1)
+
+    scraper.stop()
+
+# -------------------------------------------------------
+# Session State Initialization
+# -------------------------------------------------------
+if "results" not in st.session_state:
+    st.session_state.results = []
+if "is_scraping" not in st.session_state:
+    st.session_state.is_scraping = False
+if "start_time" not in st.session_state:
+    st.session_state.start_time = 0
+if "search_query" not in st.session_state:
+    st.session_state.search_query = ""
+if "stop_event" not in st.session_state:
+    st.session_state.stop_event = None
+if "scraper_thread" not in st.session_state:
+    st.session_state.scraper_thread = None
+
+# Cleanup legacy session state
+if "scraper" in st.session_state:
+    del st.session_state.scraper
+if "is_paused" in st.session_state:
+    del st.session_state.is_paused
+
+# -------------------------------------------------------
+# Utility Functions
+# -------------------------------------------------------
+def get_base64_of_bin_file(bin_file):
+    with open(bin_file, 'rb') as f:
+        data = f.read()
+    return base64.b64encode(data).decode()
+
+def set_png_as_page_bg(png_file):
+    if not os.path.exists(png_file):
+        return
+    
+    bin_str = get_base64_of_bin_file(png_file)
+    mime_type = "image/png"
+    if png_file.lower().endswith(".jpg") or png_file.lower().endswith(".jpeg"):
+        mime_type = "image/jpeg"
+        
+    page_bg_img = '''
+    <style>
+    @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap');
+    html, body, [class*="css"] { font-family: 'Poppins', sans-serif; color: #ffffff; }
+    .stApp {
+        background-image: url("data:%s;base64,%s");
+        background-size: cover;
+        background-position: center;
+        background-attachment: fixed;
+    }
+    
+    /* Input Styling - Zero Transparency */
+    div[data-baseweb="input"], div[data-baseweb="base-input"], div[data-baseweb="select"] > div,
+    .stTextInput > div > div, .stSelectbox > div > div, .stNumberInput > div > div {
+        background-color: #000000 !important;
+        border: 1px solid #444444 !important;
+        border-radius: 8px !important;
+        color: #ffffff !important;
+    }
+    input[type="text"], input[type="number"], .stTextInput input, .stNumberInput input {
+        background-color: #000000 !important;
+        color: #ffffff !important;
+        caret-color: #ffffff !important;
+    }
+    div[data-baseweb="input"]:focus-within, div[data-baseweb="select"]:focus-within {
+        border-color: #ffffff !important;
+        box-shadow: 0 0 8px rgba(255, 255, 255, 0.2) !important;
+    }
+    div[data-baseweb="popover"], div[data-baseweb="menu"], ul[data-baseweb="menu"] {
+        background-color: #000000 !important;
+        border: 1px solid #333333 !important;
+    }
+    li[data-baseweb="option"] { color: #cccccc !important; }
+    li[data-baseweb="option"]:hover, li[data-baseweb="option"][aria-selected="true"] {
+        background-color: #222222 !important;
+        color: #ffffff !important;
+    }
+    div[data-baseweb="select"] span { color: #ffffff !important; }
+    
+    /* Text & Headers */
+    h1, h2, h3, h4, h5, h6, p, label, span, .stMarkdown {
+        color: #ffffff !important;
+        text-shadow: 0px 2px 4px rgba(0,0,0,0.9);
+    }
+    [data-testid="stMetricValue"] { color: #ffffff !important; font-weight: 700 !important; text-shadow: 0 2px 4px rgba(0,0,0,0.9); }
+    [data-testid="stMetricLabel"] { color: #dddddd !important; }
+
+    /* Buttons */
+    .stButton > button {
+        background-color: #000000 !important;
+        color: #ffffff !important;
+        border: 1px solid #ffffff !important;
+        border-radius: 8px !important;
+        font-weight: 600 !important;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        transition: all 0.2s ease;
+    }
+    .stButton > button:hover {
+        background-color: #ffffff !important;
+        color: #000000 !important;
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+    }
+    svg { fill: #ffffff !important; }
+    .stProgress > div > div > div > div { background-color: #ffffff !important; }
+    
+    /* Mobile Optimization */
+    @media only screen and (max-width: 600px) {
+        /* Buttons - Make them larger and full width */
+        .stButton > button, .stDownloadButton > button {
+            width: 100% !important;
+            padding: 15px !important;
+            font-size: 1.1em !important;
+            height: auto !important;
+            min-height: 50px !important;
+            margin-bottom: 10px !important;
+        }
+        
+        /* Inputs - Increase touch area */
+        div[data-baseweb="input"] input, div[data-baseweb="select"] {
+            font-size: 16px !important; /* Prevent zoom on iOS */
+            min-height: 45px !important;
+        }
+        
+        /* Metrics - Stack them nicely */
+        [data-testid="stMetricValue"] {
+            font-size: 1.5rem !important;
+        }
+        
+        /* Headers - Adjust size */
+        h1 { font-size: 2rem !important; }
+        
+        /* Ensure columns have spacing when stacked */
+        [data-testid="column"] {
+            margin-bottom: 15px !important;
+            min-width: 100% !important; /* Force full width on mobile */
+        }
+    }
+    </style>
+    ''' % (mime_type, bin_str)
+    st.markdown(page_bg_img, unsafe_allow_html=True)
+
+# Set background
+bg_file = '466671893_2003287556785626_5199121047811111781_n.jpg'
+if os.path.exists(bg_file):
+    set_png_as_page_bg(bg_file)
+else:
+    set_png_as_page_bg('Screenshot_2.png')
 
 st.title("🚀 Beyond Ads Scraper")
-st.markdown("Customize your search and extract business data easily.")
 
-# Lists for Dropdowns
+# -------------------------------------------------------
+# Input Section
+# -------------------------------------------------------
 AREAS = [
     "Beirut", "Tripoli", "Sidon (Saida)", "Tyre (Sour)", "Jounieh", "Zahle", 
     "Nabatieh", "Baalbek", "Byblos (Jbeil)", "Batroun", "Aley", "Bhamdoun", "Broummana"
 ]
-
 INDUSTRIES = [
     "Real Estate Companies", "Roofing Contractors", "Dentists", "Restaurants", 
     "Law Firms", "Hotels", "Hospitals", "Supermarkets", "Pharmacies", 
-    "Schools", "Universities", "Gyms", "Car Rental", "Travel Agencies", "Banks"
+    "Schools", "Universities", "Gyms", "Car Rental", "Travel Agencies", "Banks", "Travel Agency"
 ]
 
-# Input Form
-with st.form("scrape_form"):
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        # Industry Selection
-        industry_input = st.selectbox("Select Industry", INDUSTRIES)
-        # Option to add custom industry
-        custom_industry = st.checkbox("Type custom industry?")
-        if custom_industry:
-            industry_input = st.text_input("Custom Industry", value="")
+# Only show inputs if not currently running to prevent changing params mid-scrape
+if not st.session_state.is_scraping and not st.session_state.results:
+    with st.form("scrape_form"):
+        col1, col2 = st.columns(2)
+        with col1:
+            industry_input = st.selectbox("Select Industry", INDUSTRIES)
+        with col2:
+            area_input = st.selectbox("Select Area", AREAS)
+        total_results = st.number_input("Max Results", min_value=1, max_value=500, value=5, step=1)
+        
+        submitted = st.form_submit_button("🚀 Start Scraping")
 
-    with col2:
-        # Area Selection
-        area_input = st.selectbox("Select Area", AREAS)
-        # Option to add custom area
-        custom_area = st.checkbox("Type custom area?")
-        if custom_area:
-            area_input = st.text_input("Custom Area", value="")
+    if submitted:
+        if industry_input and area_input:
+            # Setup Scraper
+            st.session_state.search_query = f"{industry_input} in {area_input}, Lebanon"
+            st.session_state.results = []
+            st.session_state.start_time = time.time()
+            st.session_state.total_target = total_results
             
-    total_results = st.number_input("Max Results", min_value=1, max_value=500, value=5, step=1)
-    
-    submitted = st.form_submit_button("🚀 Start Scraping")
-
-if submitted:
-    # Construct Search Query
-    if industry_input and area_input:
-        search_query = f"{industry_input} in {area_input}, Lebanon"
-    else:
-        st.error("Please provide both Industry and Area.")
-        st.stop()
-        
-    status_placeholder = st.empty()
-    progress_bar = st.progress(0)
-    
-    status_placeholder.info(f"Starting scraper for: **{search_query}**... Please wait.")
-    
-    def progress_callback(current, total, message=None):
-        if total > 0:
-            percent = int((current / total) * 100)
-            progress_bar.progress(min(percent, 100))
-        
-        if message:
-            status_placeholder.info(f"{message} ({current}/{total})")
-        else:
-            status_placeholder.info(f"Collected {current} of {total} required...")
-
-    try:
-        # Extract strict area name (e.g. "Sidon (Saida)" -> "Sidon")
-        # If user typed custom area, use it as is.
-        strict_area_filter = None
-        excluded_areas_list = []
-        
-        if area_input:
-            # If it comes from the dropdown list, it might have parens
+            # Filter logic
+            strict_area_filter = None
+            excluded_areas_list = []
             if "(" in area_input:
                 strict_area_filter = area_input.split("(")[0].strip()
             else:
                 strict_area_filter = area_input
-                
-            # Build exclusion list (all other areas from the main list)
-            # This prevents "Jounieh" results from appearing in "Beirut" searches
-            # (e.g. "Beirut Highway, Jounieh")
+            
+            # Prepare Allowed Areas (Main Area + Sub Areas)
+            allowed_areas_list = [strict_area_filter]
+            if strict_area_filter in AREA_MAPPINGS:
+                allowed_areas_list.extend(AREA_MAPPINGS[strict_area_filter])
+            
             for area in AREAS:
                 clean_area = area.split("(")[0].strip()
                 if clean_area.lower() != strict_area_filter.lower():
                     excluded_areas_list.append(clean_area)
 
-        # Run the scraper
-        result = scrape_places(
-            search_query, 
-            total_results, 
-            callback=progress_callback, 
-            required_area=strict_area_filter,
-            excluded_areas=excluded_areas_list
-        )
-        places = result["places"]
-        
-        # Finish progress bar
-        progress_bar.progress(100)
-        status_placeholder.empty()
-        
-        if places:
-            # Convert to DataFrame
-            df = pd.DataFrame([asdict(place) for place in places])
+            # Start Scraper
+            st.session_state.stop_event = threading.Event()
+            st.session_state.results = []
             
-            # Show success message
-            status_placeholder.success(f"✅ Found {len(df)} businesses for '{search_query}'!")
+            # Start background thread
+            st.session_state.scraper_thread = threading.Thread(
+                target=run_scraper_thread,
+                args=(
+                    st.session_state.search_query, 
+                    total_results, 
+                    strict_area_filter, 
+                    excluded_areas_list,
+                    allowed_areas_list,
+                    st.session_state.results,
+                    st.session_state.stop_event
+                )
+            )
+            # Daemon thread ensures it dies if main process dies
+            st.session_state.scraper_thread.daemon = True 
+            st.session_state.scraper_thread.start()
             
-            if result["filtered_count"] > 0:
-                st.warning(f"⚠️ Note: {result['filtered_count']} results were hidden because their address did not contain '{strict_area_filter}'.")
-            
-            # Display Data
-            st.dataframe(df)
-            
-            # Dynamic Filename: Scrape_Industry_Count.xlsx
-            # Clean industry name for filename (remove spaces/special chars if needed, but simple replace is usually enough)
-            safe_industry = industry_input.replace(" ", "_").replace("/", "-")
-            safe_area = area_input.replace(" ", "_").replace("/", "-")
-            filename = f"Scrape_{safe_industry}_{len(df)}.xlsx"
+            st.session_state.is_scraping = True
+            st.rerun()
 
-            # Download Button (Excel format)
-            import io
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                df.to_excel(writer, index=False, sheet_name='Sheet1')
+else:
+    # -------------------------------------------------------
+    # Control Panel (Running/Paused/Finished)
+    # -------------------------------------------------------
+    st.info(f"Target: **{st.session_state.search_query}**")
+    
+    col_stop = st.columns(1)[0]
+    
+    with col_stop:
+        if st.session_state.is_scraping:
+            if st.button("⏹️ Stop Scraping", type="primary", use_container_width=True):
+                logging.info("🛑 User pressed Stop Scraping button. Stopping background thread...")
+                st.session_state.is_scraping = False
+                if st.session_state.stop_event:
+                    st.session_state.stop_event.set()
+                st.rerun()
+
+    # -------------------------------------------------------
+    # Progress & Metrics
+    # -------------------------------------------------------
+    current_count = len(st.session_state.results)
+    target = st.session_state.total_target if 'total_target' in st.session_state else 1
+    
+    progress = min(int((current_count / target) * 100), 100)
+    st.progress(progress)
+    
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Found", f"{current_count} / {target}")
+    
+    elapsed = time.time() - st.session_state.start_time
+    m2.metric("Elapsed Time", f"{int(elapsed)}s")
+    
+    status_msg = "Running..."
+    if not st.session_state.is_scraping and current_count > 0:
+        status_msg = "Completed"
+        
+    m3.metric("Status", status_msg)
+
+    # -------------------------------------------------------
+    # Live Data Table
+    # -------------------------------------------------------
+    if st.session_state.results:
+        df = pd.DataFrame(st.session_state.results)
+        
+        # Remove unwanted columns
+        drop_cols = ["store_shipping", "in_store_pickup"]
+        df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
+        
+        st.dataframe(df, use_container_width=True)
+        
+        # Download Button
+        safe_name = st.session_state.search_query.replace(" ", "_").replace(",", "").replace("/", "-")
+        filename = f"Scrape_{safe_name}_{len(df)}.xlsx"
+        
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Sheet1')
             
+            # Make links clickable
+            worksheet = writer.sheets['Sheet1']
+            blue_font = Font(color="0563C1", underline="single")
+            
+            # Auto-adjust column widths
+            for i, col in enumerate(df.columns):
+                max_len = 0
+                # Header length
+                if col:
+                    max_len = len(str(col))
+                
+                # Data length
+                for val in df[col]:
+                    if val is not None:
+                        max_len = max(max_len, len(str(val)))
+                
+                # Set width with some padding (max 100 to avoid huge columns)
+                adjusted_width = min(max_len + 2, 100) 
+                col_letter = get_column_letter(i + 1)
+                worksheet.column_dimensions[col_letter].width = adjusted_width
+
+            cols_to_link = []
+            if 'website' in df.columns:
+                cols_to_link.append(df.columns.get_loc('website') + 1)
+            if 'instagram' in df.columns:
+                cols_to_link.append(df.columns.get_loc('instagram') + 1)
+                
+            for col_idx in cols_to_link:
+                for row_idx in range(2, len(df) + 2):
+                    cell = worksheet.cell(row=row_idx, column=col_idx)
+                    val = cell.value
+                    if val and isinstance(val, str) and val.startswith("http"):
+                        cell.hyperlink = val
+                        cell.font = blue_font
+
+        col_dl, col_new = st.columns([2, 1])
+        with col_dl:
             st.download_button(
-                label="📥 Download Excel",
+                label="📥 Download Excel Results",
                 data=buffer.getvalue(),
                 file_name=filename,
                 mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                use_container_width=True,
+                key='download_excel_btn'
             )
+        with col_new:
+            if st.button("🔄 New Search", use_container_width=True):
+                st.session_state.results = []
+                st.session_state.search_query = ""
+                st.session_state.is_scraping = False
+                st.rerun()
 
-        else:
-            if result["total_found"] > 0 and result["filtered_count"] > 0:
-                 status_placeholder.error(f"⚠️ Found {result['total_found']} results, but ALL were filtered out because they didn't match '{strict_area_filter}'.")
-            else:
-                 status_placeholder.warning("⚠️ No results found. Try a different query.")
-            
-    except Exception as e:
-        status_placeholder.error(f"❌ An error occurred: {str(e)}")
+# -------------------------------------------------------
+# Scraping Loop (Auto-Rerun)
+# -------------------------------------------------------
+if st.session_state.is_scraping:
+    # Check if thread is still alive
+    if st.session_state.scraper_thread and st.session_state.scraper_thread.is_alive():
+        # Rerun to continue updating UI
+        time.sleep(1) # Refresh every 1 second
+        st.rerun()
+    else:
+        # Thread finished
+        st.session_state.is_scraping = False
+        st.success("Scraping finished!")
+        st.rerun()
