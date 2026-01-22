@@ -171,7 +171,7 @@ def set_png_as_page_bg(png_file):
     @media only screen and (max-width: 600px) {
         /* Buttons - Make them larger and full width */
         .stButton > button, .stDownloadButton > button {
-            width: 100% !important;
+            width: 100%% !important;
             padding: 15px !important;
             font-size: 1.1em !important;
             height: auto !important;
@@ -196,7 +196,7 @@ def set_png_as_page_bg(png_file):
         /* Ensure columns have spacing when stacked */
         [data-testid="column"] {
             margin-bottom: 15px !important;
-            min-width: 100% !important; /* Force full width on mobile */
+            min-width: 100%% !important; /* Force full width on mobile */
         }
     }
     </style>
