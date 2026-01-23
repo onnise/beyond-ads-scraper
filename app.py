@@ -347,19 +347,20 @@ if st.session_state.is_scraping or st.session_state.results:
             drop_cols = ["store_shipping", "in_store_pickup"]
             df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
             
-            # Sanitize DataFrame for Streamlit (Avoid Arrow LargeUtf8 errors)
-            # Reconstruct DataFrame from records to ensure standard Python types
-            df = pd.DataFrame.from_records(df.to_dict('records'))
+            # Sanitize DataFrame for Streamlit
+            # We convert to string to ensure compatibility
+            df = df.astype(str)
             
-            # Explicitly cast to object to avoid PyArrow backed strings
-            df = df.astype(object)
-            
-            # Additional safety: Convert all contents to string if they are not None
-            for col in df.columns:
-                df[col] = df[col].apply(lambda x: str(x) if x is not None else "")
-                
+            # Use st.table (static HTML) for the last few rows to avoid Arrow/LargeUtf8 errors on frontend
+            # This is a robust fallback since st.dataframe is crashing on Streamlit Cloud + Python 3.13
             try:
-                dataframe_placeholder.dataframe(df, use_container_width=True)
+                # Show summary metric
+                # Display only the last 10 results in a static table to prevent crashes
+                if len(df) > 0:
+                    # Create a static table of the tail
+                    preview_df = df.tail(10)
+                    # We use st.table directly in the placeholder
+                    dataframe_placeholder.table(preview_df)
             except Exception as e:
                 status_placeholder.warning(f"Could not render data table: {e}")
                 
