@@ -348,9 +348,15 @@ if st.session_state.is_scraping or st.session_state.results:
             df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
             
             # Sanitize DataFrame for Streamlit (Avoid Arrow LargeUtf8 errors)
+            # Reconstruct DataFrame from records to ensure standard Python types
+            df = pd.DataFrame.from_records(df.to_dict('records'))
+            
+            # Explicitly cast to object to avoid PyArrow backed strings
+            df = df.astype(object)
+            
+            # Additional safety: Convert all contents to string if they are not None
             for col in df.columns:
-                # Force everything to standard object/str types to prevent PyArrow LargeUtf8 issues
-                df[col] = df[col].astype(str)
+                df[col] = df[col].apply(lambda x: str(x) if x is not None else "")
                 
             try:
                 dataframe_placeholder.dataframe(df, use_container_width=True)
