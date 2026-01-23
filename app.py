@@ -346,7 +346,17 @@ if st.session_state.is_scraping or st.session_state.results:
             df = pd.DataFrame(st.session_state.results)
             drop_cols = ["store_shipping", "in_store_pickup"]
             df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
-            dataframe_placeholder.dataframe(df, use_container_width=True)
+            
+            # Sanitize DataFrame for Streamlit (Avoid Arrow LargeUtf8 errors)
+            for col in df.columns:
+                # Force everything to standard object/str types to prevent PyArrow LargeUtf8 issues
+                df[col] = df[col].astype(str)
+                
+            try:
+                dataframe_placeholder.dataframe(df, use_container_width=True)
+            except Exception as e:
+                status_placeholder.warning(f"Could not render data table: {e}")
+                
             return df
         return None
 
