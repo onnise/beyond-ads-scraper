@@ -25,41 +25,56 @@ st.set_page_config(page_title="Beyond Ads Scraper", page_icon="🚀", layout="wi
 # -------------------------------------------------------
 # Scraper Thread Function
 # -------------------------------------------------------
-def run_scraper_thread(search_query, total_target, required_area, excluded_areas, allowed_areas, results_list, stop_event):
-    scraper = GoogleMapsScraper()
-    success = scraper.start(search_query, total_target, required_area, excluded_areas, allowed_areas)
-    
-    if not success:
-        return
+def run_scraper_thread(search_query, total_target, required_area, excluded_areas, allowed_areas, results_list, stop_event, status_dict):
+    try:
+        status_dict["text"] = "Initializing browser..."
+        scraper = GoogleMapsScraper()
+        
+        status_dict["text"] = "Navigating to Google Maps..."
+        success = scraper.start(search_query, total_target, required_area, excluded_areas, allowed_areas)
+        
+        if not success:
+            status_dict["text"] = "Failed to find results (Timeout or Blocking)."
+            status_dict["error"] = True
+            return
 
-    while len(scraper.places) < total_target and not stop_event.is_set():
-        # Perform one step
-        item = scraper.step(should_stop_callback=stop_event.is_set)
-        
-        if item:
-            # Thread-safe append (lists are thread-safe in CPython for append)
-            results_list.append(asdict(item))
-        
-        # Check if scraper is stuck or finished (replicating logic from main.py)
-        # Also check stop event here just in case
-        if stop_event.is_set():
-            break
-        listings_locator = scraper.page.locator('//a[contains(@href, "https://www.google.com/maps/place")]')
-        try:
-            listings_count = listings_locator.count()
-            if scraper.processed_count >= listings_count:
-                # Try scroll
-                scraper.page.mouse.wheel(0, 10000)
-                scraper.page.wait_for_timeout(2000)
-                if scraper.page.locator('//a[contains(@href, "https://www.google.com/maps/place")]').count() <= listings_count:
-                    # No new results after scroll
-                    break
-        except:
-            break
+        status_dict["text"] = "Scraping in progress..."
+        while len(scraper.places) < total_target and not stop_event.is_set():
+            # Perform one step
+            item = scraper.step(should_stop_callback=stop_event.is_set)
             
-        time.sleep(0.1)
+            if item:
+                # Thread-safe append (lists are thread-safe in CPython for append)
+                results_list.append(asdict(item))
+                status_dict["text"] = f"Found: {item.name}"
+            
+            # Check if scraper is stuck or finished (replicating logic from main.py)
+            # Also check stop event here just in case
+            if stop_event.is_set():
+                break
+            listings_locator = scraper.page.locator('//a[contains(@href, "https://www.google.com/maps/place")]')
+            try:
+                listings_count = listings_locator.count()
+                if scraper.processed_count >= listings_count:
+                    # Try scroll
+                    status_dict["text"] = "Scrolling for more results..."
+                    scraper.page.mouse.wheel(0, 10000)
+                    scraper.page.wait_for_timeout(2000)
+                    if scraper.page.locator('//a[contains(@href, "https://www.google.com/maps/place")]').count() <= listings_count:
+                        # No new results after scroll
+                        status_dict["text"] = "No more results found."
+                        break
+            except:
+                break
+                
+            time.sleep(0.1)
 
-    scraper.stop()
+        scraper.stop()
+        status_dict["text"] = "Finished."
+    except Exception as e:
+        status_dict["text"] = f"Error: {str(e)}"
+        status_dict["error"] = True
+        logging.error(f"Thread error: {e}")
 
 # -------------------------------------------------------
 # Session State Initialization
@@ -76,6 +91,8 @@ if "stop_event" not in st.session_state:
     st.session_state.stop_event = None
 if "scraper_thread" not in st.session_state:
     st.session_state.scraper_thread = None
+if "status_dict" not in st.session_state:
+    st.session_state.status_dict = {"text": "", "error": False}
 
 # Cleanup legacy session state
 if "scraper" in st.session_state:
@@ -226,8 +243,10 @@ INDUSTRIES = [
 ]
 
 # Only show inputs if not currently running to prevent changing params mid-scrape
+main_placeholder = st.empty()
+
 if not st.session_state.is_scraping and not st.session_state.results:
-    with st.form("scrape_form"):
+    with main_placeholder.form("scrape_form"):
         col1, col2 = st.columns(2)
         with col1:
             industry_input = st.selectbox("Select Industry", INDUSTRIES)
@@ -266,6 +285,7 @@ if not st.session_state.is_scraping and not st.session_state.results:
             # Start Scraper
             st.session_state.stop_event = threading.Event()
             st.session_state.results = []
+            st.session_state.status_dict = {"text": "Starting...", "error": False}
             
             # Start background thread
             st.session_state.scraper_thread = threading.Thread(
@@ -277,7 +297,8 @@ if not st.session_state.is_scraping and not st.session_state.results:
                     excluded_areas_list,
                     allowed_areas_list,
                     st.session_state.results,
-                    st.session_state.stop_event
+                    st.session_state.stop_event,
+                    st.session_state.status_dict
                 )
             )
             # Daemon thread ensures it dies if main process dies
@@ -285,76 +306,100 @@ if not st.session_state.is_scraping and not st.session_state.results:
             st.session_state.scraper_thread.start()
             
             st.session_state.is_scraping = True
+            main_placeholder.empty() # Clear the form
+            
+# -------------------------------------------------------
+# Progress & Results Section
+# -------------------------------------------------------
+if st.session_state.is_scraping or st.session_state.results:
+    st.info(f"Target: **{st.session_state.search_query}**")
+    
+    # Placeholders for dynamic content
+    progress_bar = st.progress(0)
+    metrics_placeholder = st.empty()
+    status_placeholder = st.empty()
+    dataframe_placeholder = st.empty()
+    
+    def render_metrics():
+        current_count = len(st.session_state.results)
+        target = st.session_state.total_target if 'total_target' in st.session_state else 1
+        
+        # Update Progress
+        progress = min(int((current_count / target) * 100), 100)
+        progress_bar.progress(progress)
+        
+        # Update Metrics
+        m1, m2, m3 = metrics_placeholder.columns(3)
+        m1.metric("Found", f"{current_count} / {target}")
+        
+        elapsed = time.time() - st.session_state.start_time
+        m2.metric("Elapsed Time", f"{int(elapsed)}s")
+        
+        status_msg = "Running..." if st.session_state.is_scraping else "Completed"
+        if st.session_state.status_dict.get("error"):
+            status_msg = "Error"
+        
+        m3.metric("Status", status_msg)
+        
+        # Update DataFrame
+        if st.session_state.results:
+            df = pd.DataFrame(st.session_state.results)
+            drop_cols = ["store_shipping", "in_store_pickup"]
+            df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
+            dataframe_placeholder.dataframe(df, use_container_width=True)
+            return df
+        return None
+
+    # Initial Render
+    df = render_metrics()
+    
+    # Scraping Loop (Blocking UI Update)
+    if st.session_state.is_scraping:
+        stop_btn_placeholder = st.empty()
+        if stop_btn_placeholder.button("⏹️ Stop Scraping (Hold to Stop)", type="primary"):
+            st.session_state.stop_event.set()
+            st.session_state.is_scraping = False
             try:
                 st.rerun()
             except AttributeError:
-                # Fallback for some Streamlit versions/environments where st.rerun might fail
-                try:
-                    st.experimental_rerun()
-                except:
-                    pass
-            except Exception as e:
-                logging.error(f"Rerun failed: {e}")
+                st.experimental_rerun()
+            except Exception:
+                pass
 
-else:
-    # -------------------------------------------------------
-    # Control Panel (Running/Paused/Finished)
-    # -------------------------------------------------------
-    st.info(f"Target: **{st.session_state.search_query}**")
-    
-    col_stop = st.columns(1)[0]
-    
-    with col_stop:
-        if st.session_state.is_scraping:
-            if st.button("⏹️ Stop Scraping", type="primary", use_container_width=True):
-                logging.info("🛑 User pressed Stop Scraping button. Stopping background thread...")
-                st.session_state.is_scraping = False
-                if st.session_state.stop_event:
-                    st.session_state.stop_event.set()
-                try:
-                    st.rerun()
-                except AttributeError:
-                    try:
-                        st.experimental_rerun()
-                    except:
-                        pass
-                except Exception:
-                    pass
-
-    # -------------------------------------------------------
-    # Progress & Metrics
-    # -------------------------------------------------------
-    current_count = len(st.session_state.results)
-    target = st.session_state.total_target if 'total_target' in st.session_state else 1
-    
-    progress = min(int((current_count / target) * 100), 100)
-    st.progress(progress)
-    
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Found", f"{current_count} / {target}")
-    
-    elapsed = time.time() - st.session_state.start_time
-    m2.metric("Elapsed Time", f"{int(elapsed)}s")
-    
-    status_msg = "Running..."
-    if not st.session_state.is_scraping and current_count > 0:
-        status_msg = "Completed"
+        while st.session_state.scraper_thread.is_alive():
+            render_metrics()
+            
+            # Update detailed status
+            if st.session_state.status_dict["text"]:
+                status_placeholder.info(st.session_state.status_dict["text"])
+            
+            if st.session_state.status_dict["error"]:
+                 st.error(st.session_state.status_dict["text"])
+                 st.session_state.is_scraping = False
+                 break
+                 
+            time.sleep(1)
+            
+        # Thread finished
+        st.session_state.is_scraping = False
+        render_metrics()
         
-    m3.metric("Status", status_msg)
+        if st.session_state.status_dict["error"]:
+             st.error(f"Scraping failed: {st.session_state.status_dict['text']}")
+        else:
+             st.success("Scraping finished!")
+             
+        if 'stop_btn_placeholder' in locals():
+            stop_btn_placeholder.empty()
 
-    # -------------------------------------------------------
-    # Live Data Table
-    # -------------------------------------------------------
-    if st.session_state.results:
+    # Download & New Search (Only when finished)
+    if not st.session_state.is_scraping and st.session_state.results:
         df = pd.DataFrame(st.session_state.results)
-        
-        # Remove unwanted columns
+        # Re-clean for download
         drop_cols = ["store_shipping", "in_store_pickup"]
         df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
         
-        st.dataframe(df, use_container_width=True)
-        
-        # Download Button
+        # Generate Excel
         safe_name = st.session_state.search_query.replace(" ", "_").replace(",", "").replace("/", "-")
         filename = f"Scrape_{safe_name}_{len(df)}.xlsx"
         
@@ -369,25 +414,16 @@ else:
             # Auto-adjust column widths
             for i, col in enumerate(df.columns):
                 max_len = 0
-                # Header length
-                if col:
-                    max_len = len(str(col))
-                
-                # Data length
+                if col: max_len = len(str(col))
                 for val in df[col]:
-                    if val is not None:
-                        max_len = max(max_len, len(str(val)))
-                
-                # Set width with some padding (max 100 to avoid huge columns)
+                    if val is not None: max_len = max(max_len, len(str(val)))
                 adjusted_width = min(max_len + 2, 100) 
                 col_letter = get_column_letter(i + 1)
                 worksheet.column_dimensions[col_letter].width = adjusted_width
 
             cols_to_link = []
-            if 'website' in df.columns:
-                cols_to_link.append(df.columns.get_loc('website') + 1)
-            if 'instagram' in df.columns:
-                cols_to_link.append(df.columns.get_loc('instagram') + 1)
+            if 'website' in df.columns: cols_to_link.append(df.columns.get_loc('website') + 1)
+            if 'instagram' in df.columns: cols_to_link.append(df.columns.get_loc('instagram') + 1)
                 
             for col_idx in cols_to_link:
                 for row_idx in range(2, len(df) + 2):
@@ -404,51 +440,12 @@ else:
                 data=buffer.getvalue(),
                 file_name=filename,
                 mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                use_container_width=True,
-                key='download_excel_btn'
+                use_container_width=True
             )
         with col_new:
             if st.button("🔄 New Search", use_container_width=True):
                 st.session_state.results = []
                 st.session_state.search_query = ""
                 st.session_state.is_scraping = False
-                try:
-                    st.rerun()
-                except AttributeError:
-                    try:
-                        st.experimental_rerun()
-                    except:
-                        pass
-                except Exception:
-                    pass
-
-# -------------------------------------------------------
-# Scraping Loop (Auto-Rerun)
-# -------------------------------------------------------
-if st.session_state.is_scraping:
-    # Check if thread is still alive
-    if st.session_state.scraper_thread and st.session_state.scraper_thread.is_alive():
-        # Rerun to continue updating UI
-        time.sleep(1) # Refresh every 1 second
-        try:
-            st.rerun()
-        except AttributeError:
-            try:
-                st.experimental_rerun()
-            except:
-                pass
-        except Exception:
-            pass
-    else:
-        # Thread finished
-        st.session_state.is_scraping = False
-        st.success("Scraping finished!")
-        try:
-            st.rerun()
-        except AttributeError:
-            try:
-                st.experimental_rerun()
-            except:
-                pass
-        except Exception:
-            pass
+                try: st.rerun()
+                except: pass
