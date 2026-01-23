@@ -436,7 +436,8 @@ if st.session_state.is_scraping or st.session_state.results:
             except Exception:
                 pass
 
-        while st.session_state.scraper_thread.is_alive():
+        # Robust loop with safety check
+        while st.session_state.get("scraper_thread") and st.session_state.scraper_thread.is_alive():
             render_metrics()
             
             # Update detailed status
