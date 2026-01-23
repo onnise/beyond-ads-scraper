@@ -357,7 +357,15 @@ if st.session_state.is_scraping or st.session_state.results:
                 # Show summary metric
                 # Display only the last 10 results in a static HTML table to prevent crashes
                 if len(df) > 0:
-                    preview_df = df.tail(10)
+                    preview_cols = ["name", "address", "website", "phone_number", "instagram", "reviews_count"]
+                    # Filter columns that exist in df
+                    cols_to_show = [c for c in preview_cols if c in df.columns]
+                    # If we have matches, use them, otherwise show all
+                    if cols_to_show:
+                        preview_df = df[cols_to_show].tail(10)
+                    else:
+                        preview_df = df.tail(10)
+
                     # Convert to HTML to avoid Arrow serialization entirely
                     html = preview_df.to_html(classes='dataframe', index=False)
                     # Add custom CSS to make it look decent
@@ -369,16 +377,21 @@ if st.session_state.is_scraping or st.session_state.results:
     width: 100%;
     background-color: #000000;
     color: #ffffff;
+    font-size: 12px;
 }}
 .dataframe td, .dataframe th {{
     border: 1px solid #444;
-    padding: 8px;
+    padding: 4px 6px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 200px;
 }}
 .dataframe tr:nth-child(even) {{background-color: #111;}}
 .dataframe tr:hover {{background-color: #222;}}
 .dataframe th {{
-    padding-top: 12px;
-    padding-bottom: 12px;
+    padding-top: 8px;
+    padding-bottom: 8px;
     text-align: left;
     background-color: #333;
     color: white;
