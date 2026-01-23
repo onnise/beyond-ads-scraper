@@ -371,6 +371,19 @@ if st.session_state.is_scraping or st.session_state.results:
     
     # Scraping Loop (Blocking UI Update)
     if st.session_state.is_scraping:
+        # Safety check: Ensure scraper_thread exists
+        if "scraper_thread" not in st.session_state or st.session_state.scraper_thread is None:
+            st.warning("Scraping state mismatch (Thread missing). Resetting.")
+            st.session_state.is_scraping = False
+            st.session_state.stop_event = None
+            try:
+                st.rerun()
+            except AttributeError:
+                st.experimental_rerun()
+            except Exception:
+                pass
+            st.stop()
+
         stop_btn_placeholder = st.empty()
         if stop_btn_placeholder.button("⏹️ Stop Scraping (Hold to Stop)", type="primary"):
             st.session_state.stop_event.set()
