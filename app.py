@@ -355,12 +355,39 @@ if st.session_state.is_scraping or st.session_state.results:
             # This is a robust fallback since st.dataframe is crashing on Streamlit Cloud + Python 3.13
             try:
                 # Show summary metric
-                # Display only the last 10 results in a static table to prevent crashes
+                # Display only the last 10 results in a static HTML table to prevent crashes
                 if len(df) > 0:
-                    # Create a static table of the tail
                     preview_df = df.tail(10)
-                    # We use st.table directly in the placeholder
-                    dataframe_placeholder.table(preview_df)
+                    # Convert to HTML to avoid Arrow serialization entirely
+                    html = preview_df.to_html(classes='dataframe', index=False)
+                    # Add custom CSS to make it look decent
+                    html = f"""
+                    <style>
+                    .dataframe {{
+                        font-family: sans-serif;
+                        border-collapse: collapse;
+                        width: 100%;
+                        background-color: #000000;
+                        color: #ffffff;
+                    }}
+                    .dataframe td, .dataframe th {{
+                        border: 1px solid #444;
+                        padding: 8px;
+                    }}
+                    .dataframe tr:nth-child(even) {{background-color: #111;}}
+                    .dataframe tr:hover {{background-color: #222;}}
+                    .dataframe th {{
+                        padding-top: 12px;
+                        padding-bottom: 12px;
+                        text-align: left;
+                        background-color: #333;
+                        color: white;
+                    }}
+                    </style>
+                    <h3>Live Preview (Last 10 results)</h3>
+                    {html}
+                    """
+                    dataframe_placeholder.markdown(html, unsafe_allow_html=True)
             except Exception as e:
                 status_placeholder.warning(f"Could not render data table: {e}")
                 

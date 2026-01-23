@@ -4,4 +4,3 @@ openpyxl
 streamlit
 altair<5
 standard-imghdr
-pyarrow
