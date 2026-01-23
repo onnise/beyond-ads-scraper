@@ -2,3 +2,4 @@ playwright
 pandas
 openpyxl
 streamlit
+altair<5
