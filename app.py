@@ -321,7 +321,8 @@ if st.session_state.is_scraping or st.session_state.results:
     dataframe_placeholder = st.empty()
     
     def render_metrics():
-        current_count = len(st.session_state.results)
+        results = st.session_state.get("results", [])
+        current_count = len(results)
         target = st.session_state.total_target if 'total_target' in st.session_state else 1
         
         # Update Progress
@@ -342,8 +343,8 @@ if st.session_state.is_scraping or st.session_state.results:
         m3.metric("Status", status_msg)
         
         # Update DataFrame
-        if st.session_state.results:
-            df = pd.DataFrame(st.session_state.results)
+        if results:
+            df = pd.DataFrame(results)
             drop_cols = ["store_shipping", "in_store_pickup"]
             df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
             
