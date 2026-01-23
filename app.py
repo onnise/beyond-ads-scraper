@@ -412,7 +412,15 @@ else:
                 st.session_state.results = []
                 st.session_state.search_query = ""
                 st.session_state.is_scraping = False
-                st.rerun()
+                try:
+                    st.rerun()
+                except AttributeError:
+                    try:
+                        st.experimental_rerun()
+                    except:
+                        pass
+                except Exception:
+                    pass
 
 # -------------------------------------------------------
 # Scraping Loop (Auto-Rerun)
@@ -422,9 +430,25 @@ if st.session_state.is_scraping:
     if st.session_state.scraper_thread and st.session_state.scraper_thread.is_alive():
         # Rerun to continue updating UI
         time.sleep(1) # Refresh every 1 second
-        st.rerun()
+        try:
+            st.rerun()
+        except AttributeError:
+            try:
+                st.experimental_rerun()
+            except:
+                pass
+        except Exception:
+            pass
     else:
         # Thread finished
         st.session_state.is_scraping = False
         st.success("Scraping finished!")
-        st.rerun()
+        try:
+            st.rerun()
+        except AttributeError:
+            try:
+                st.experimental_rerun()
+            except:
+                pass
+        except Exception:
+            pass
