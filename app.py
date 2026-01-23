@@ -285,7 +285,16 @@ if not st.session_state.is_scraping and not st.session_state.results:
             st.session_state.scraper_thread.start()
             
             st.session_state.is_scraping = True
-            st.rerun()
+            try:
+                st.rerun()
+            except AttributeError:
+                # Fallback for some Streamlit versions/environments where st.rerun might fail
+                try:
+                    st.experimental_rerun()
+                except:
+                    pass
+            except Exception as e:
+                logging.error(f"Rerun failed: {e}")
 
 else:
     # -------------------------------------------------------
@@ -302,7 +311,15 @@ else:
                 st.session_state.is_scraping = False
                 if st.session_state.stop_event:
                     st.session_state.stop_event.set()
-                st.rerun()
+                try:
+                    st.rerun()
+                except AttributeError:
+                    try:
+                        st.experimental_rerun()
+                    except:
+                        pass
+                except Exception:
+                    pass
 
     # -------------------------------------------------------
     # Progress & Metrics
