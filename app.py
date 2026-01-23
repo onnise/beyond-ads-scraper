@@ -362,31 +362,31 @@ if st.session_state.is_scraping or st.session_state.results:
                     html = preview_df.to_html(classes='dataframe', index=False)
                     # Add custom CSS to make it look decent
                     html = f"""
-                    <style>
-                    .dataframe {{
-                        font-family: sans-serif;
-                        border-collapse: collapse;
-                        width: 100%;
-                        background-color: #000000;
-                        color: #ffffff;
-                    }}
-                    .dataframe td, .dataframe th {{
-                        border: 1px solid #444;
-                        padding: 8px;
-                    }}
-                    .dataframe tr:nth-child(even) {{background-color: #111;}}
-                    .dataframe tr:hover {{background-color: #222;}}
-                    .dataframe th {{
-                        padding-top: 12px;
-                        padding-bottom: 12px;
-                        text-align: left;
-                        background-color: #333;
-                        color: white;
-                    }}
-                    </style>
-                    <h3>Live Preview (Last 10 results)</h3>
-                    {html}
-                    """
+<style>
+.dataframe {{
+    font-family: sans-serif;
+    border-collapse: collapse;
+    width: 100%;
+    background-color: #000000;
+    color: #ffffff;
+}}
+.dataframe td, .dataframe th {{
+    border: 1px solid #444;
+    padding: 8px;
+}}
+.dataframe tr:nth-child(even) {{background-color: #111;}}
+.dataframe tr:hover {{background-color: #222;}}
+.dataframe th {{
+    padding-top: 12px;
+    padding-bottom: 12px;
+    text-align: left;
+    background-color: #333;
+    color: white;
+}}
+</style>
+<h3>Live Preview (Last 10 results)</h3>
+{html}
+"""
                     dataframe_placeholder.markdown(html, unsafe_allow_html=True)
             except Exception as e:
                 status_placeholder.warning(f"Could not render data table: {e}")
