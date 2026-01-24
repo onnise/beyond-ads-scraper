@@ -313,6 +313,10 @@ def validate_lebanese_phone(phone_raw: str):
     
     # Standardize to local format (with leading 0) if possible
     
+    # REJECT international numbers (e.g. +1 877...) that made it through
+    if len(digits) > 8 and not digits.startswith('961'):
+        return digits, "International/Invalid", False
+
     # Case 1: 7 digits (e.g. 3xxxxxx or 1xxxxxx for Beirut landline without 0)
     if len(digits) == 7:
         if digits.startswith('3'):
