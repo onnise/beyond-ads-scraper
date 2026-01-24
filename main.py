@@ -539,6 +539,7 @@ class GoogleMapsScraper:
         self.required_area = None
         self.allowed_areas = []
         self.excluded_areas = []
+        self.seen_places = set()
         
     def start(self, search_for: str, total: int, required_area: str = None, excluded_areas: List[str] = None, allowed_areas: List[str] = None):
         setup_logging()
@@ -550,6 +551,7 @@ class GoogleMapsScraper:
         self.places = []
         self.processed_count = 0
         self.stats = {"total_found": 0, "filtered_count": 0, "places": []}
+        self.seen_places = set()
         
         self.playwright = sync_playwright().start()
         
@@ -663,6 +665,13 @@ class GoogleMapsScraper:
             
             place = extract_place(self.page, self.context, should_stop_callback)
             self.processed_count += 1
+            
+            # Deduplication
+            unique_key = (place.name.strip().lower(), place.address.strip().lower())
+            if unique_key in self.seen_places:
+                logging.info(f"Skipping duplicate: {place.name}")
+                return None
+            self.seen_places.add(unique_key)
             
             # Filter Logic
             self.stats["total_found"] += 1
