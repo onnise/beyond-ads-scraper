@@ -692,6 +692,13 @@ class GoogleMapsScraper:
                 # If we have a specific list of allowed sub-areas (including the main area)
                 # Check if ANY of them are in the address
                 matched_area = False
+                
+                # STRICT check: Address MUST contain "Lebanon" or the specific area
+                if "lebanon" not in place.address.lower() and self.required_area and self.required_area.lower() not in place.address.lower():
+                     self.stats["filtered_count"] += 1
+                     logging.info(f"Skipped {place.name}: Address '{place.address}' missing 'Lebanon' or main area")
+                     return None
+
                 for area in self.allowed_areas:
                     if area.lower() in place.address.lower():
                         matched_area = True
