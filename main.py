@@ -363,6 +363,13 @@ def extract_place(page: Page, context: BrowserContext = None, should_stop_callba
         
     place.address = extract_text(page, address_xpath)
     
+    # FAST FAIL: Check if address is clearly outside target region to avoid expensive processing
+    if place.address:
+        addr_lower = place.address.lower()
+        if "united states" in addr_lower or "canada" in addr_lower or " usa " in addr_lower or " uk " in addr_lower or "united kingdom" in addr_lower:
+            logging.info(f"Fast fail: Address '{place.address}' is outside target region")
+            return place # Return early, will be filtered by step() logic
+    
     # Extract website href
     try:
         if page.locator('//a[@data-item-id="authority"]').count() > 0:
@@ -579,7 +586,9 @@ class GoogleMapsScraper:
                 raise e
             
         self.context = self.browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            geolocation={"latitude": 33.8938, "longitude": 35.5018}, # Beirut
+            permissions=["geolocation"]
         )
         self.page = self.context.new_page()
         
