@@ -316,6 +316,11 @@ def validate_lebanese_phone(phone_raw: str):
     # REJECT international numbers (e.g. +1 877...) that made it through
     if len(digits) > 8 and not digits.startswith('961'):
         return digits, "International/Invalid", False
+    
+    # Also reject US toll-free area codes if they slipped through
+    # 800, 888, 877, 866, 855, 844, 833 are US toll-free
+    if len(digits) == 10 and digits[:3] in ['800', '888', '877', '866', '855', '844', '833']:
+        return digits, "International/Invalid", False
 
     # Case 1: 7 digits (e.g. 3xxxxxx or 1xxxxxx for Beirut landline without 0)
     if len(digits) == 7:
@@ -581,7 +586,9 @@ class GoogleMapsScraper:
         # Navigate
         import urllib.parse
         encoded_query = urllib.parse.quote(search_for)
-        url = f"https://www.google.com/maps/search/{encoded_query}?hl=en"
+        # Use a more specific viewport or parameter to bias results to Lebanon?
+        # &gl=lb might help bias results to Lebanon region
+        url = f"https://www.google.com/maps/search/{encoded_query}?hl=en&gl=lb"
         
         logging.info(f"Navigating to {url}")
         self.page.goto(url, timeout=60000)
