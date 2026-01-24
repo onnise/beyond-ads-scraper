@@ -10,7 +10,7 @@ import base64
 import os
 import io
 import openpyxl
-from openpyxl.styles import Font
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
 import threading
@@ -471,6 +471,9 @@ if st.session_state.is_scraping or st.session_state.results:
         drop_cols = ["store_shipping", "in_store_pickup"]
         df = df.drop(columns=[c for c in drop_cols if c in df.columns], errors='ignore')
         
+        # Rename columns for better readability (e.g., phone_number -> Phone Number)
+        df.columns = [c.replace('_', ' ').title() for c in df.columns]
+        
         # Generate Excel
         safe_name = st.session_state.search_query.replace(" ", "_").replace(",", "").replace("/", "-")
         filename = f"Scrape_{safe_name}_{len(df)}.xlsx"
@@ -479,9 +482,20 @@ if st.session_state.is_scraping or st.session_state.results:
         with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Sheet1')
             
-            # Make links clickable
+            # Access the worksheet
             worksheet = writer.sheets['Sheet1']
+            
+            # Styles
             blue_font = Font(color="0563C1", underline="single")
+            header_font = Font(name='Calibri', size=11, bold=True, color="FFFFFF")
+            header_fill = PatternFill(start_color="36454F", end_color="36454F", fill_type="solid") # Charcoal/Dark Blue-ish
+            center_align = Alignment(horizontal='center', vertical='center')
+            
+            # Apply Header Styles
+            for cell in worksheet[1]:
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = center_align
             
             # Auto-adjust column widths
             for i, col in enumerate(df.columns):
@@ -489,13 +503,16 @@ if st.session_state.is_scraping or st.session_state.results:
                 if col: max_len = len(str(col))
                 for val in df[col]:
                     if val is not None: max_len = max(max_len, len(str(val)))
-                adjusted_width = min(max_len + 2, 100) 
+                # Cap width at 50 to prevent massive columns
+                adjusted_width = min(max_len + 2, 50) 
                 col_letter = get_column_letter(i + 1)
                 worksheet.column_dimensions[col_letter].width = adjusted_width
 
+            # Make links clickable
             cols_to_link = []
-            if 'website' in df.columns: cols_to_link.append(df.columns.get_loc('website') + 1)
-            if 'instagram' in df.columns: cols_to_link.append(df.columns.get_loc('instagram') + 1)
+            # Check for title-cased column names
+            if 'Website' in df.columns: cols_to_link.append(df.columns.get_loc('Website') + 1)
+            if 'Instagram' in df.columns: cols_to_link.append(df.columns.get_loc('Instagram') + 1)
                 
             for col_idx in cols_to_link:
                 for row_idx in range(2, len(df) + 2):
