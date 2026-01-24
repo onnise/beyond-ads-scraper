@@ -1,6 +1,6 @@
 playwright
-pandas==2.2.1
+pandas
 openpyxl
-streamlit==1.32.2
+streamlit
 altair<5
 standard-imghdr
